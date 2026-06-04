@@ -82,9 +82,9 @@
 
 *Depends on: Phase 0.3*
 
-- [ ] **3.1** Module `fish_s2_infer::tokenizer` using existing `tokenizers` dep — load `models/tokenizer.json`.
-- [ ] **3.2** Port **ByteLevel** pre-BPE table from s2.cpp (GPT-2 byte↔unicode); add vectors of known strings from HF reference.
-- [ ] **3.3** Golden test: token IDs vs Python `transformers` or s2.cpp CLI debug output for 20 strings (tags, CJK, emoji).
+- [x] **3.1** Module `fish_s2_infer::tokenizer` using existing `tokenizers` dep — load `models/tokenizer.json`.
+- [x] **3.2** Port **ByteLevel** pre-BPE table from s2.cpp (GPT-2 byte↔unicode); add vectors of known strings from HF reference.
+- [x] **3.3** Golden test: token IDs vs Python `transformers` or s2.cpp CLI debug output for 20 strings (tags, CJK, emoji). Fixture: `crates/fish_s2_infer/tests/fixtures/tokenizer_golden.tsv`; verified against Python `transformers` on 2026-06-04.
 
 **Acceptance:** Token ID sequence matches reference on all fixture strings.
 

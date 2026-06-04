@@ -10,3 +10,8 @@ Or a unified s2-pro-f16.gguf (rodrigomt/s2-pro-gguf).
 
 Checkpoint (Safetensors) for GGUF export:
   models/s2-pro/config.json + model*.safetensors + codec.pth
+
+Download helper:
+  .\scripts\download_models.ps1
+  .\scripts\download_models.ps1 -IncludeGguf -Quant f16
+  .\scripts\download_models.ps1 -IncludeGguf -Quant q4_k_m -DryRun
