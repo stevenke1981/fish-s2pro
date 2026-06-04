@@ -120,27 +120,34 @@ Phase 4.2 prep slice:
   sublayer on top of the attention output: `ffn_norm -> w1/w3 -> SwiGLU -> w2
   -> residual`. This is covered by toy block smoke tests and the ignored local
   GGUF layer 0 finite smoke.
+- `fish_s2_infer::slow_ar::forward_slow_ar_block_prefill_layers` chains a
+  contiguous Slow-AR layer range using the same prefill-style path. Each layer's
+  `block_hidden` sequence becomes the next layer's hidden input, with one KV
+  cache spanning the requested positions and registry layer ids.
 - `fish_s2_infer::slow_ar::SlowArLayerF16Weights` binds a registry layer to
   real local GGUF F16 tensors (`attention_norm`, `q_norm`, `k_norm`, `wqkv`,
   `wo`, `ffn_norm`, `w1`, `w2`, `w3`) and feeds them into the layer skeleton.
   The ignored fixture loads layer 0 and checks shape consistency plus finite
-  attention and FFN outputs.
+  attention and FFN outputs, then runs a two-layer GGUF chain smoke.
 - `fish_s2_slow_ar_dump` writes JSON stats for the same layer 0 Rust fixture,
   including len/L2/mean_abs/max_abs/first8 for normalized, Q, K, V, attention,
   projection, attention residual hidden, FFN normalized/gate/up/SwiGLU/projected,
   and final block hidden state. `--tokens N` uses the prefill-style sequence path
   and emits a `sequence` array with per-token positions while keeping token 0
-  stats at the top level for backward compatibility.
+  stats at the top level for backward compatibility. `--layers M` chains
+  contiguous Slow-AR layers from `--layer` and dumps the final layer's stats with
+  `layer_count` metadata.
 - `scripts\dump_s2cpp_slow_ar_stats.ps1` patches a local ignored s2.cpp clone,
   builds a standalone `s2_slow_ar_dump` helper without the Crow/server target,
   and writes the matching layer-local full-block C++ JSON stats dump. `-Tokens N`
-  mirrors the Rust sequence fixture. It defaults to CPU and also supports CUDA via
-  `-Cuda -CudaDevice 0`; on Visual Studio 18/2026 with CUDA 12.6, add
-  `-AllowUnsupportedCudaCompiler`.
+  mirrors the Rust sequence fixture and `-Layers M` mirrors the Rust layer-chain
+  fixture. It defaults to CPU and also supports CUDA via `-Cuda -CudaDevice 0`;
+  on Visual Studio 18/2026 with CUDA 12.6, add `-AllowUnsupportedCudaCompiler`.
 - `fish_s2_parity compare-slow-ar` compares Rust and C++ Slow-AR JSON stats
   dumps with per-token tensor names such as `token1.key` and
-  `token1.ffn_projected`. Tolerances are tuned for ggml F16/RoPE vs Rust scalar
-  `f32` drift across a two-token decode.
+  `token1.ffn_projected`, and checks `layer_count` when present. Tolerances are
+  tuned for ggml F16/RoPE vs Rust scalar `f32` drift across a two-token,
+  two-layer decode.
 
 Root tensor specs:
 
@@ -190,17 +197,22 @@ cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registr
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layer0_rust_stats.json
 cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layer0_rust_seq2_stats.json --tokens 2
+cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layers0_2_rust_seq2_stats.json --tokens 2 --layers 2
 .\scripts\dump_s2cpp_slow_ar_stats.ps1
 .\scripts\dump_s2cpp_slow_ar_stats.ps1 -Output .\output\slow_ar_layer0_cpp_seq2_stats.json -Tokens 2
+.\scripts\dump_s2cpp_slow_ar_stats.ps1 -Output .\output\slow_ar_layers0_2_cpp_seq2_stats.json -Tokens 2 -Layers 2
 .\scripts\dump_s2cpp_slow_ar_stats.ps1 -Cuda -CudaDevice 0 -AllowUnsupportedCudaCompiler -Output .\output\slow_ar_layer0_cpp_stats_cuda.json
+.\scripts\dump_s2cpp_slow_ar_stats.ps1 -Cuda -CudaDevice 0 -AllowUnsupportedCudaCompiler -Output .\output\slow_ar_layers0_2_cpp_seq2_stats_cuda.json -Tokens 2 -Layers 2
 cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_cpp_stats.json .\output\slow_ar_layer0_rust_stats.json
 cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_cpp_seq2_stats.json .\output\slow_ar_layer0_rust_seq2_stats.json
+cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layers0_2_cpp_seq2_stats.json .\output\slow_ar_layers0_2_rust_seq2_stats.json
 cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_cpp_stats_cuda.json .\output\slow_ar_layer0_rust_stats.json
+cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layers0_2_cpp_seq2_stats_cuda.json .\output\slow_ar_layers0_2_rust_seq2_stats.json
 cargo clippy --all-targets -- -D warnings
 ```
 
 Next Phase 4 work:
 
 - Add typed views for quantized weights needed by non-F16 model variants.
-- Broaden the Slow-AR parity fixture from looped multi-token decode to batched
-  prefill over multiple tokens.
+- Broaden the Slow-AR layer-chain fixture from two layers to deeper ranges,
+  then the full 36-layer Slow-AR stack before sampling.

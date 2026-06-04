@@ -3,6 +3,7 @@ param(
     [string] $Transformer,
     [string] $Output,
     [int] $Layer = 0,
+    [int] $Layers = 1,
     [int] $Position = 0,
     [int] $Tokens = 1,
     [int] $Threads = 4,
@@ -61,12 +62,23 @@ function Patch-S2CppSource {
     bool dump_slow_ar_layer_stats(const std::string & transformer_path_for_json,
                                   const std::string & output_path,
                                   int32_t layer,
+                                  int32_t layer_count,
                                   int32_t position,
                                   int32_t token_count,
                                   int32_t n_threads);
 
 "@
     $header = $header.Replace($oldHeaderMethod, $newHeaderMethod)
+    $header = $header.Replace(@"
+    // Dump a layer-local Slow-AR attention slice for Rust parity.
+    bool dump_slow_ar_layer_stats(const std::string & transformer_path_for_json,
+                                  const std::string & output_path,
+                                  int32_t layer,
+                                  int32_t position,
+                                  int32_t token_count,
+                                  int32_t n_threads);
+
+"@, $newHeaderMethod)
     if (-not $header.Contains("dump_slow_ar_layer_stats")) {
         $needle = "    const ModelHParams & hparams() const { return hparams_; }`r`n"
         $header = $header.Replace($needle, $newHeaderMethod + $needle)
@@ -79,20 +91,18 @@ function Patch-S2CppSource {
     $source = Add-IncludeOnce $source "#include <iomanip>"
     $source = Add-IncludeOnce $source "#include <sstream>"
     if (-not $source.Contains("#include `"ggml-cuda.h`"")) {
-        $source = $source.Replace("#include `"../include/s2_model.h`"`r`n", @"
+        $source = [regex]::Replace($source, '#include "\.\./include/s2_model\.h"\r?\n', @"
 #include "../include/s2_model.h"
 #ifdef GGML_USE_CUDA
 #include "ggml-cuda.h"
 #endif
-"@)
+"@, 1)
     }
     $source = $source.Replace("#endif#include <iostream>", "#endif`r`n#include <iostream>")
 
     if (-not $source.Contains("FISH_S2_CUDA_DEVICE")) {
-        $source = $source.Replace(@"
-    if (!backend_) {
-        backend_ = ggml_backend_cpu_init();
-    }
+        $source = [regex]::Replace($source, @"
+    if \(!backend_\) \{\r?\n        backend_ = ggml_backend_cpu_init\(\);\r?\n    \}
 "@, @"
 #ifdef GGML_USE_CUDA
     if (!backend_) {
@@ -110,7 +120,7 @@ function Patch-S2CppSource {
     if (!backend_) {
         backend_ = ggml_backend_cpu_init();
     }
-"@)
+"@, 1)
     }
 
     $source = $source.Replace(@"
@@ -282,11 +292,17 @@ static std::vector<float> token_slice_s2_dump(const std::vector<float> & values,
 bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_for_json,
                                            const std::string & output_path,
                                            int32_t layer_index,
+                                           int32_t layer_count,
                                            int32_t position,
                                            int32_t token_count,
                                            int32_t n_threads) {
     if (layer_index < 0 || layer_index >= static_cast<int32_t>(weights_.layers.size())) {
         std::fprintf(stderr, "[dump] layer out of range: %d\n", layer_index);
+        return false;
+    }
+    if (layer_count <= 0 || layer_index + layer_count > static_cast<int32_t>(weights_.layers.size())) {
+        std::fprintf(stderr, "[dump] layer_count out of range: start=%d count=%d available=%zu\n",
+                     layer_index, layer_count, weights_.layers.size());
         return false;
     }
     if (position < 0) {
@@ -314,13 +330,13 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     const int32_t dim       = hparams_.embedding_length;
     const int32_t n_head    = hparams_.head_count;
     const int32_t n_head_kv = hparams_.head_count_kv;
-    const auto & layer = weights_.layers[static_cast<size_t>(layer_index)];
+    const auto & first_layer = weights_.layers[static_cast<size_t>(layer_index)];
 
     int32_t head_dim = 0;
-    if (hparams_.attention_qk_norm && layer.q_norm) {
-        head_dim = static_cast<int32_t>(layer.q_norm->ne[0]);
+    if (hparams_.attention_qk_norm && first_layer.q_norm) {
+        head_dim = static_cast<int32_t>(first_layer.q_norm->ne[0]);
     } else {
-        head_dim = static_cast<int32_t>(layer.wo->ne[0] / n_head);
+        head_dim = static_cast<int32_t>(first_layer.wo->ne[0] / n_head);
     }
 
     const int32_t q_size   = n_head * head_dim;
@@ -329,126 +345,150 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     const float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     const int32_t n_tokens = token_count;
 
-    const size_t ctx_size = 16u * 1024u * 1024u;
+    const size_t ctx_size = static_cast<size_t>(16u * 1024u * 1024u) * static_cast<size_t>(layer_count);
     std::vector<uint8_t> ctx_buf(ctx_size);
     ggml_init_params p = { ctx_size, ctx_buf.data(), true };
     ggml_context * ctx0 = ggml_init(p);
     if (!ctx0) return false;
 
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 4096, false);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx0, 4096 * layer_count, false);
     ggml_tensor * hidden_input = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens);
     ggml_tensor * positions = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
 
-    ggml_tensor * attn_in = rms_norm_weighted(ctx0, hidden_input, layer.attention_norm, hparams_.rms_norm_eps);
-    ggml_tensor * qkv     = mul_mat_checked(ctx0, layer.wqkv, attn_in, "mul_mat:dump_wqkv");
-    const size_t elem_size = ggml_element_size(qkv);
+    ggml_tensor * current_hidden = hidden_input;
+    ggml_tensor * dump_normalized = nullptr;
+    ggml_tensor * dump_query = nullptr;
+    ggml_tensor * dump_key = nullptr;
+    ggml_tensor * dump_value = nullptr;
+    ggml_tensor * dump_attention = nullptr;
+    ggml_tensor * dump_projected = nullptr;
+    ggml_tensor * dump_hidden = nullptr;
+    ggml_tensor * dump_ffn_normalized = nullptr;
+    ggml_tensor * dump_ffn_gate = nullptr;
+    ggml_tensor * dump_ffn_up = nullptr;
+    ggml_tensor * dump_ffn_activated = nullptr;
+    ggml_tensor * dump_ffn_projected = nullptr;
+    ggml_tensor * dump_block_hidden = nullptr;
 
-    ggml_tensor * q2d = ggml_view_2d(ctx0, qkv, q_size, n_tokens, qkv->nb[1], 0);
-    ggml_tensor * k2d = ggml_view_2d(ctx0, qkv, kv_size, n_tokens, qkv->nb[1], q_size * elem_size);
-    ggml_tensor * v2d = ggml_view_2d(ctx0, qkv, kv_size, n_tokens, qkv->nb[1], (q_size + kv_size) * elem_size);
+    for (int32_t layer_offset = 0; layer_offset < layer_count; ++layer_offset) {
+        const int32_t actual_layer_index = layer_index + layer_offset;
+        const bool dump_this_layer = layer_offset + 1 == layer_count;
+        const auto & layer = weights_.layers[static_cast<size_t>(actual_layer_index)];
 
-    ggml_tensor * q = ggml_reshape_3d(ctx0, ggml_cont(ctx0, q2d), head_dim, n_head, n_tokens);
-    ggml_tensor * k = ggml_reshape_3d(ctx0, ggml_cont(ctx0, k2d), head_dim, n_head_kv, n_tokens);
-    ggml_tensor * v = ggml_reshape_3d(ctx0, ggml_cont(ctx0, v2d), head_dim, n_head_kv, n_tokens);
+        ggml_tensor * attn_in = rms_norm_weighted(ctx0, current_hidden, layer.attention_norm, hparams_.rms_norm_eps);
+        ggml_tensor * qkv     = mul_mat_checked(ctx0, layer.wqkv, attn_in, "mul_mat:dump_wqkv");
+        const size_t elem_size = ggml_element_size(qkv);
 
-    if (hparams_.attention_qk_norm) {
-        q = rms_norm_weighted(ctx0, q, layer.q_norm, hparams_.rms_norm_eps);
-        k = rms_norm_weighted(ctx0, k, layer.k_norm, hparams_.rms_norm_eps);
+        ggml_tensor * q2d = ggml_view_2d(ctx0, qkv, q_size, n_tokens, qkv->nb[1], 0);
+        ggml_tensor * k2d = ggml_view_2d(ctx0, qkv, kv_size, n_tokens, qkv->nb[1], q_size * elem_size);
+        ggml_tensor * v2d = ggml_view_2d(ctx0, qkv, kv_size, n_tokens, qkv->nb[1], (q_size + kv_size) * elem_size);
+
+        ggml_tensor * q = ggml_reshape_3d(ctx0, ggml_cont(ctx0, q2d), head_dim, n_head, n_tokens);
+        ggml_tensor * k = ggml_reshape_3d(ctx0, ggml_cont(ctx0, k2d), head_dim, n_head_kv, n_tokens);
+        ggml_tensor * v = ggml_reshape_3d(ctx0, ggml_cont(ctx0, v2d), head_dim, n_head_kv, n_tokens);
+
+        if (hparams_.attention_qk_norm) {
+            q = rms_norm_weighted(ctx0, q, layer.q_norm, hparams_.rms_norm_eps);
+            k = rms_norm_weighted(ctx0, k, layer.k_norm, hparams_.rms_norm_eps);
+        }
+
+        q = ggml_rope_ext(ctx0, q, positions, nullptr, head_dim, 0,
+                          hparams_.context_length, hparams_.rope_freq_base,
+                          1.0f, 0.0f, 1.0f, 1.0f, 1.0f);
+        k = ggml_rope_ext(ctx0, k, positions, nullptr, head_dim, 0,
+                          hparams_.context_length, hparams_.rope_freq_base,
+                          1.0f, 0.0f, 1.0f, 1.0f, 1.0f);
+
+        const size_t layer_off_k = static_cast<size_t>(actual_layer_index) * memory_k_->nb[3];
+        const size_t layer_off_v = static_cast<size_t>(actual_layer_index) * memory_v_->nb[3];
+        const size_t token_off_k = static_cast<size_t>(position) * memory_k_->nb[2];
+        const size_t token_off_v = static_cast<size_t>(position) * memory_v_->nb[2];
+
+        ggml_tensor * k_slot = ggml_view_3d(ctx0, memory_k_,
+            head_dim, n_head_kv, n_tokens,
+            memory_k_->nb[1], memory_k_->nb[2],
+            layer_off_k + token_off_k);
+        ggml_tensor * v_slot = ggml_view_3d(ctx0, memory_v_,
+            head_dim, n_head_kv, n_tokens,
+            memory_v_->nb[1], memory_v_->nb[2],
+            layer_off_v + token_off_v);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, k, k_slot));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, v, v_slot));
+
+        ggml_tensor * k_mem = k;
+        ggml_tensor * v_mem = v;
+        if (position > 0) {
+            ggml_tensor * k_past = ggml_reshape_3d(ctx0,
+                ggml_view_1d(ctx0, memory_k_, static_cast<int64_t>(position) * kv_size, layer_off_k),
+                head_dim, n_head_kv, position);
+            ggml_tensor * v_past = ggml_reshape_3d(ctx0,
+                ggml_view_1d(ctx0, memory_v_, static_cast<int64_t>(position) * kv_size, layer_off_v),
+                head_dim, n_head_kv, position);
+            if (k_past->type != k->type) k_past = ggml_cast(ctx0, k_past, k->type);
+            if (v_past->type != v->type) v_past = ggml_cast(ctx0, v_past, v->type);
+            k_mem = ggml_concat(ctx0, k_past, k, 2);
+            v_mem = ggml_concat(ctx0, v_past, v, 2);
+        }
+
+        if (n_head != n_head_kv && q->type != GGML_TYPE_F32) {
+            q = ggml_cast(ctx0, q, GGML_TYPE_F32);
+        }
+        ggml_tensor * k_rep = repeat_interleave_heads(ctx0, k_mem, n_head / n_head_kv);
+        ggml_tensor * v_rep = repeat_interleave_heads(ctx0, v_mem, n_head / n_head_kv);
+
+        ggml_tensor * Q   = ggml_permute(ctx0, q,     0, 2, 1, 3);
+        ggml_tensor * K   = ggml_permute(ctx0, k_rep, 0, 2, 1, 3);
+        ggml_tensor * KQ  = mul_mat_checked(ctx0, K, Q, "mul_mat:dump_kq");
+        ggml_tensor * KQs = ggml_scale(ctx0, KQ, attn_scale);
+        ggml_tensor * KQm = ggml_diag_mask_inf(ctx0, KQs, position);
+        ggml_tensor * KQf = ggml_soft_max(ctx0, KQm);
+
+        ggml_tensor * V       = ggml_cont(ctx0, ggml_permute(ctx0, v_rep, 1, 2, 0, 3));
+        ggml_tensor * KQV     = mul_mat_checked(ctx0, V, KQf, "mul_mat:dump_kqv");
+        ggml_tensor * KQVm    = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
+        ggml_tensor * attn_cur = ggml_cpy(ctx0, KQVm,
+                                          ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, q_size, n_tokens));
+        ggml_tensor * projected = mul_mat_checked(ctx0, layer.wo, attn_cur, "mul_mat:dump_wo");
+        ggml_tensor * hidden_out = ggml_add(ctx0, current_hidden, projected);
+        ggml_tensor * ffn_in = rms_norm_weighted(ctx0, hidden_out, layer.ffn_norm, hparams_.rms_norm_eps);
+        ggml_tensor * ffn_gate = mul_mat_checked(ctx0, layer.w1, ffn_in, "mul_mat:dump_w1");
+        ggml_tensor * ffn_up = mul_mat_checked(ctx0, layer.w3, ffn_in, "mul_mat:dump_w3");
+        ggml_tensor * ffn_activated = ggml_swiglu_split(ctx0, ffn_gate, ffn_up);
+        ggml_tensor * ffn_projected = mul_mat_checked(ctx0, layer.w2, ffn_activated, "mul_mat:dump_w2");
+        ggml_tensor * block_hidden = ggml_add(ctx0, hidden_out, ffn_projected);
+
+        if (dump_this_layer) {
+            // gallocr may reuse intermediate buffers. Copy every tensor we want to dump
+            // into dedicated graph outputs so host reads are stable after compute.
+            dump_normalized = ggml_cpy(ctx0, attn_in,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+            dump_query = ggml_cpy(ctx0, q,
+                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_dim, n_head, n_tokens));
+            dump_key = ggml_cpy(ctx0, k,
+                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_dim, n_head_kv, n_tokens));
+            dump_value = ggml_cpy(ctx0, v,
+                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_dim, n_head_kv, n_tokens));
+            dump_attention = ggml_cpy(ctx0, attn_cur,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, q_size, n_tokens));
+            dump_projected = ggml_cpy(ctx0, projected,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+            dump_hidden = ggml_cpy(ctx0, hidden_out,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+            dump_ffn_normalized = ggml_cpy(ctx0, ffn_in,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+            dump_ffn_gate = ggml_cpy(ctx0, ffn_gate,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
+            dump_ffn_up = ggml_cpy(ctx0, ffn_up,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
+            dump_ffn_activated = ggml_cpy(ctx0, ffn_activated,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
+            dump_ffn_projected = ggml_cpy(ctx0, ffn_projected,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+            dump_block_hidden = ggml_cpy(ctx0, block_hidden,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+        }
+        current_hidden = block_hidden;
     }
-
-    q = ggml_rope_ext(ctx0, q, positions, nullptr, head_dim, 0,
-                      hparams_.context_length, hparams_.rope_freq_base,
-                      1.0f, 0.0f, 1.0f, 1.0f, 1.0f);
-    k = ggml_rope_ext(ctx0, k, positions, nullptr, head_dim, 0,
-                      hparams_.context_length, hparams_.rope_freq_base,
-                      1.0f, 0.0f, 1.0f, 1.0f, 1.0f);
-
-    const size_t layer_off_k = static_cast<size_t>(layer_index) * memory_k_->nb[3];
-    const size_t layer_off_v = static_cast<size_t>(layer_index) * memory_v_->nb[3];
-    const size_t token_off_k = static_cast<size_t>(position) * memory_k_->nb[2];
-    const size_t token_off_v = static_cast<size_t>(position) * memory_v_->nb[2];
-
-    ggml_tensor * k_slot = ggml_view_3d(ctx0, memory_k_,
-        head_dim, n_head_kv, n_tokens,
-        memory_k_->nb[1], memory_k_->nb[2],
-        layer_off_k + token_off_k);
-    ggml_tensor * v_slot = ggml_view_3d(ctx0, memory_v_,
-        head_dim, n_head_kv, n_tokens,
-        memory_v_->nb[1], memory_v_->nb[2],
-        layer_off_v + token_off_v);
-    ggml_build_forward_expand(gf, ggml_cpy(ctx0, k, k_slot));
-    ggml_build_forward_expand(gf, ggml_cpy(ctx0, v, v_slot));
-
-    ggml_tensor * k_mem = k;
-    ggml_tensor * v_mem = v;
-    if (position > 0) {
-        ggml_tensor * k_past = ggml_reshape_3d(ctx0,
-            ggml_view_1d(ctx0, memory_k_, static_cast<int64_t>(position) * kv_size, layer_off_k),
-            head_dim, n_head_kv, position);
-        ggml_tensor * v_past = ggml_reshape_3d(ctx0,
-            ggml_view_1d(ctx0, memory_v_, static_cast<int64_t>(position) * kv_size, layer_off_v),
-            head_dim, n_head_kv, position);
-        if (k_past->type != k->type) k_past = ggml_cast(ctx0, k_past, k->type);
-        if (v_past->type != v->type) v_past = ggml_cast(ctx0, v_past, v->type);
-        k_mem = ggml_concat(ctx0, k_past, k, 2);
-        v_mem = ggml_concat(ctx0, v_past, v, 2);
-    }
-
-    if (n_head != n_head_kv && q->type != GGML_TYPE_F32) {
-        q = ggml_cast(ctx0, q, GGML_TYPE_F32);
-    }
-    ggml_tensor * k_rep = repeat_interleave_heads(ctx0, k_mem, n_head / n_head_kv);
-    ggml_tensor * v_rep = repeat_interleave_heads(ctx0, v_mem, n_head / n_head_kv);
-
-    ggml_tensor * Q   = ggml_permute(ctx0, q,     0, 2, 1, 3);
-    ggml_tensor * K   = ggml_permute(ctx0, k_rep, 0, 2, 1, 3);
-    ggml_tensor * KQ  = mul_mat_checked(ctx0, K, Q, "mul_mat:dump_kq");
-    ggml_tensor * KQs = ggml_scale(ctx0, KQ, attn_scale);
-    ggml_tensor * KQm = ggml_diag_mask_inf(ctx0, KQs, position);
-    ggml_tensor * KQf = ggml_soft_max(ctx0, KQm);
-
-    ggml_tensor * V       = ggml_cont(ctx0, ggml_permute(ctx0, v_rep, 1, 2, 0, 3));
-    ggml_tensor * KQV     = mul_mat_checked(ctx0, V, KQf, "mul_mat:dump_kqv");
-    ggml_tensor * KQVm    = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
-    ggml_tensor * attn_cur = ggml_cpy(ctx0, KQVm,
-                                      ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, q_size, n_tokens));
-    ggml_tensor * projected = mul_mat_checked(ctx0, layer.wo, attn_cur, "mul_mat:dump_wo");
-    ggml_tensor * hidden_out = ggml_add(ctx0, hidden_input, projected);
-    ggml_tensor * ffn_in = rms_norm_weighted(ctx0, hidden_out, layer.ffn_norm, hparams_.rms_norm_eps);
-    ggml_tensor * ffn_gate = mul_mat_checked(ctx0, layer.w1, ffn_in, "mul_mat:dump_w1");
-    ggml_tensor * ffn_up = mul_mat_checked(ctx0, layer.w3, ffn_in, "mul_mat:dump_w3");
-    ggml_tensor * ffn_activated = ggml_swiglu_split(ctx0, ffn_gate, ffn_up);
-    ggml_tensor * ffn_projected = mul_mat_checked(ctx0, layer.w2, ffn_activated, "mul_mat:dump_w2");
-    ggml_tensor * block_hidden = ggml_add(ctx0, hidden_out, ffn_projected);
-
-    // gallocr may reuse intermediate buffers. Copy every tensor we want to dump
-    // into dedicated graph outputs so host reads are stable after compute.
-    ggml_tensor * dump_normalized = ggml_cpy(ctx0, attn_in,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
-    ggml_tensor * dump_query = ggml_cpy(ctx0, q,
-        ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_dim, n_head, n_tokens));
-    ggml_tensor * dump_key = ggml_cpy(ctx0, k,
-        ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_dim, n_head_kv, n_tokens));
-    ggml_tensor * dump_value = ggml_cpy(ctx0, v,
-        ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_dim, n_head_kv, n_tokens));
-    ggml_tensor * dump_attention = ggml_cpy(ctx0, attn_cur,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, q_size, n_tokens));
-    ggml_tensor * dump_projected = ggml_cpy(ctx0, projected,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
-    ggml_tensor * dump_hidden = ggml_cpy(ctx0, hidden_out,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
-    ggml_tensor * dump_ffn_normalized = ggml_cpy(ctx0, ffn_in,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
-    ggml_tensor * dump_ffn_gate = ggml_cpy(ctx0, ffn_gate,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
-    ggml_tensor * dump_ffn_up = ggml_cpy(ctx0, ffn_up,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
-    ggml_tensor * dump_ffn_activated = ggml_cpy(ctx0, ffn_activated,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
-    ggml_tensor * dump_ffn_projected = ggml_cpy(ctx0, ffn_projected,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
-    ggml_tensor * dump_block_hidden = ggml_cpy(ctx0, block_hidden,
-        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
 
     ggml_build_forward_expand(gf, dump_normalized);
     ggml_build_forward_expand(gf, dump_query);
@@ -501,6 +541,7 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     out << "{\n";
     out << "  \"transformer\": \"" << json_escape_s2_dump(transformer_path_for_json) << "\",\n";
     out << "  \"layer\": " << layer_index << ",\n";
+    out << "  \"layer_count\": " << layer_count << ",\n";
     out << "  \"position\": " << position << ",\n";
     out << "  \"token_count\": " << n_tokens << ",\n";
     out << "  \"hidden_size\": " << dim << ",\n";
@@ -596,6 +637,7 @@ struct Args {
     std::string transformer;
     std::string output;
     int layer = 0;
+    int layers = 1;
     int position = 0;
     int tokens = 1;
     int threads = 4;
@@ -603,7 +645,7 @@ struct Args {
 
 static void print_help() {
     std::cerr
-        << "Usage: s2_slow_ar_dump --transformer <transformer.gguf> --output <stats.json> [--layer 0] [--position 0] [--tokens 1] [--threads 4]\n";
+        << "Usage: s2_slow_ar_dump --transformer <transformer.gguf> --output <stats.json> [--layer 0] [--layers 1] [--position 0] [--tokens 1] [--threads 4]\n";
 }
 
 static bool parse_int(const char * label, const std::string & value, int & out) {
@@ -637,6 +679,9 @@ static bool parse_args(int argc, char ** argv, Args & args) {
         } else if (arg == "--layer") {
             const char * value = need_value("--layer");
             if (!value || !parse_int("--layer", value, args.layer)) return false;
+        } else if (arg == "--layers") {
+            const char * value = need_value("--layers");
+            if (!value || !parse_int("--layers", value, args.layers)) return false;
         } else if (arg == "--position") {
             const char * value = need_value("--position");
             if (!value || !parse_int("--position", value, args.position)) return false;
@@ -666,6 +711,10 @@ static bool parse_args(int argc, char ** argv, Args & args) {
         std::cerr << "--tokens must be greater than zero\n";
         return false;
     }
+    if (args.layers <= 0) {
+        std::cerr << "--layers must be greater than zero\n";
+        return false;
+    }
     return true;
 }
 
@@ -681,7 +730,7 @@ int main(int argc, char ** argv) {
         std::cerr << "failed to load transformer: " << args.transformer << "\n";
         return 1;
     }
-    if (!model.dump_slow_ar_layer_stats(args.transformer, args.output, args.layer, args.position, args.tokens, args.threads)) {
+    if (!model.dump_slow_ar_layer_stats(args.transformer, args.output, args.layer, args.layers, args.position, args.tokens, args.threads)) {
         std::cerr << "failed to dump Slow-AR stats\n";
         return 1;
     }
@@ -777,6 +826,7 @@ if ($Cuda) {
     --transformer $resolvedTransformer `
     --output $resolvedOutput `
     --layer $Layer `
+    --layers $Layers `
     --position $Position `
     --tokens $Tokens `
     --threads $Threads

@@ -518,6 +518,46 @@ impl SlowArLayerSkeleton<'_> {
     }
 }
 
+pub fn forward_slow_ar_block_prefill_layers(
+    gguf: &GgufFile,
+    registry: &TransformerTensorRegistry,
+    layer_start: usize,
+    layer_count: usize,
+    hidden_tokens: &[Vec<f32>],
+    start_position: usize,
+) -> Result<Vec<SlowArLayerBlockOutput>> {
+    if layer_count == 0 {
+        return Err(InferError::Message(
+            "layer_count must be greater than zero".into(),
+        ));
+    }
+    let layer_end = checked_add(layer_start, layer_count, "layer_end")?;
+    if layer_end > registry.slow_layer_count() {
+        return Err(InferError::Message(format!(
+            "slow layer range out of bounds: start={layer_start} count={layer_count} available={}",
+            registry.slow_layer_count()
+        )));
+    }
+
+    let graph = registry.graph_spec();
+    let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow)?;
+    let max_seq_len = checked_add(start_position, hidden_tokens.len(), "max_seq_len")?;
+    let mut cache = SlowArKvCache::new(graph.kv_cache, max_seq_len)?;
+    let mut layer_hidden_tokens = hidden_tokens.to_vec();
+    let mut outputs = Vec::new();
+    for layer in layer_start..layer_end {
+        let weights = SlowArLayerF16Weights::from_gguf_layer(gguf, registry, layer)?;
+        outputs = weights.skeleton(shape).forward_block_prefill_sequence(
+            &layer_hidden_tokens,
+            &mut cache,
+            layer,
+            start_position,
+        )?;
+        layer_hidden_tokens = outputs.iter().map(|output| output.hidden.clone()).collect();
+    }
+    Ok(outputs)
+}
+
 fn rms_norm_heads(input: &[f32], weight: &[f32], head_dim: usize, eps: f32) -> Result<Vec<f32>> {
     if !input.len().is_multiple_of(head_dim) {
         return Err(InferError::Message(format!(
@@ -811,7 +851,7 @@ mod tests {
         let mut block_cache = SlowArKvCache::new(graph.kv_cache, 1).unwrap();
         let block = weights
             .skeleton(shape)
-            .forward_block_prefill_sequence(&[hidden], &mut block_cache, 0, 0)
+            .forward_block_prefill_sequence(&[hidden.clone()], &mut block_cache, 0, 0)
             .unwrap()
             .remove(0);
         assert_eq!(block.feed_forward.normalized.len(), shape.hidden_size);
@@ -826,6 +866,15 @@ mod tests {
         assert!(all_finite(&block.feed_forward.activated));
         assert!(all_finite(&block.feed_forward.projected));
         assert!(all_finite(&block.hidden));
+
+        let multi_layer =
+            forward_slow_ar_block_prefill_layers(&gguf, &registry, 0, 2, &[hidden], 0).unwrap();
+        assert_eq!(multi_layer.len(), 1);
+        assert_eq!(multi_layer[0].hidden.len(), shape.hidden_size);
+        assert!(all_finite(&multi_layer[0].attention.hidden));
+        assert!(all_finite(&multi_layer[0].feed_forward.projected));
+        assert!(all_finite(&multi_layer[0].hidden));
+        assert_ne!(multi_layer[0].hidden, block.hidden);
     }
 
     struct ToyLayerWeights {

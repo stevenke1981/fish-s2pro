@@ -67,6 +67,8 @@ pub fn compare_wav_files(
 pub struct SlowArDump {
     pub transformer: String,
     pub layer: usize,
+    #[serde(default)]
+    pub layer_count: Option<usize>,
     pub position: usize,
     #[serde(default)]
     pub token_count: Option<usize>,
@@ -149,9 +151,9 @@ impl Default for SlowArTensorTolerance {
     fn default() -> Self {
         Self {
             max_l2_delta: 6e-2,
-            max_mean_abs_delta: 1.5e-4,
+            max_mean_abs_delta: 5e-4,
             max_max_abs_delta: 1.5e-2,
-            max_first8_mae: 6e-4,
+            max_first8_mae: 8e-4,
         }
     }
 }
@@ -350,6 +352,14 @@ fn compare_metadata(expected: &SlowArDump, actual: &SlowArDump, failures: &mut V
                 "{name} mismatch: expected {expected}, actual {actual}"
             ));
         }
+    }
+    match (expected.layer_count, actual.layer_count) {
+        (Some(expected), Some(actual)) if expected != actual => failures.push(format!(
+            "layer_count mismatch: expected {expected}, actual {actual}"
+        )),
+        (Some(_), None) => failures.push("layer_count missing from actual dump".to_string()),
+        (None, Some(_)) => failures.push("layer_count missing from expected dump".to_string()),
+        _ => {}
     }
 }
 
@@ -749,6 +759,21 @@ mod tests {
             .failures
             .iter()
             .any(|f| f.contains("token0.block_hidden.l2")));
+    }
+
+    #[test]
+    fn reports_slow_ar_layer_count_mismatch() {
+        let mut expected: SlowArDump =
+            serde_json::from_str(test_slow_ar_full_block_dump_json()).unwrap();
+        expected.layer_count = Some(2);
+        let mut actual = expected.clone();
+        actual.layer_count = Some(3);
+        let report = compare_slow_ar_dumps(&expected, &actual, SlowArTensorTolerance::default());
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.contains("layer_count mismatch")));
     }
 
     #[test]

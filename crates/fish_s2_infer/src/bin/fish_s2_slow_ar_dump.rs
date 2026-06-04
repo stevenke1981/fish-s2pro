@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use fish_s2_core::gguf::GgufFile;
 use fish_s2_infer::{
-    SlowArKvCache, SlowArLayerBlockOutput, SlowArLayerF16Weights, SlowArLayerShape,
+    forward_slow_ar_block_prefill_layers, SlowArLayerBlockOutput, SlowArLayerShape,
     TransformerTensorRegistry,
 };
 
@@ -10,6 +10,7 @@ use fish_s2_infer::{
 struct Dump {
     transformer: String,
     layer: usize,
+    layer_count: usize,
     position: usize,
     token_count: usize,
     hidden_size: usize,
@@ -67,16 +68,16 @@ fn main() -> fish_s2_infer::Result<()> {
     let registry = TransformerTensorRegistry::from_gguf(&gguf)?;
     let graph = registry.graph_spec();
     let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow)?;
-    let weights = SlowArLayerF16Weights::from_gguf_layer(&gguf, &registry, args.layer)?;
 
     let hidden_tokens = (0..args.tokens)
         .map(|index| hidden_fixture(shape.hidden_size, index))
         .collect::<Vec<_>>();
-    let mut cache = SlowArKvCache::new(graph.kv_cache, args.position + args.tokens)?;
-    let outputs = weights.skeleton(shape).forward_block_prefill_sequence(
-        &hidden_tokens,
-        &mut cache,
+    let outputs = forward_slow_ar_block_prefill_layers(
+        &gguf,
+        &registry,
         args.layer,
+        args.layers,
+        &hidden_tokens,
         args.position,
     )?;
 
@@ -106,6 +107,7 @@ fn build_dump(args: &Args, shape: SlowArLayerShape, outputs: Vec<SlowArLayerBloc
     Dump {
         transformer: args.transformer.display().to_string(),
         layer: args.layer,
+        layer_count: args.layers,
         position: args.position,
         token_count: args.tokens,
         hidden_size: shape.hidden_size,
@@ -182,6 +184,7 @@ struct Args {
     transformer: PathBuf,
     output: Option<PathBuf>,
     layer: usize,
+    layers: usize,
     position: usize,
     tokens: usize,
 }
@@ -191,6 +194,7 @@ impl Args {
         let mut transformer = None;
         let mut output = None;
         let mut layer = 0usize;
+        let mut layers = 1usize;
         let mut position = 0usize;
         let mut tokens = 1usize;
         let mut args = std::env::args().skip(1);
@@ -199,6 +203,7 @@ impl Args {
                 "--transformer" => transformer = args.next().map(PathBuf::from),
                 "--output" => output = args.next().map(PathBuf::from),
                 "--layer" => layer = parse_usize("--layer", args.next())?,
+                "--layers" => layers = parse_nonzero_usize("--layers", args.next())?,
                 "--position" => position = parse_usize("--position", args.next())?,
                 "--tokens" => tokens = parse_nonzero_usize("--tokens", args.next())?,
                 "--help" | "-h" => {
@@ -219,6 +224,7 @@ impl Args {
             transformer,
             output,
             layer,
+            layers,
             position,
             tokens,
         })
@@ -245,6 +251,6 @@ fn parse_nonzero_usize(name: &str, value: Option<String>) -> fish_s2_infer::Resu
 
 fn print_help() {
     eprintln!(
-        "Usage: fish_s2_slow_ar_dump --transformer <s2-pro-*-transformer-only.gguf> [--output output.json] [--layer 0] [--position 0] [--tokens 1]"
+        "Usage: fish_s2_slow_ar_dump --transformer <s2-pro-*-transformer-only.gguf> [--output output.json] [--layer 0] [--layers 1] [--position 0] [--tokens 1]"
     );
 }
