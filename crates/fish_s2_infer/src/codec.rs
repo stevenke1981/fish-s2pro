@@ -9,6 +9,7 @@ use std::path::Path;
 use fish_s2_core::gguf::{GgmlType, GgufFile, GgufTensorInfo};
 
 use crate::error::{InferError, Result};
+use crate::tensor::{embedding_lookup_rows, linear, F16TensorView};
 
 pub const CODEC_ARCHITECTURE: &str = "fish-speech-codec";
 pub const CODEC_HIDDEN_SIZE: u64 = 1024;
@@ -274,6 +275,196 @@ impl CodecTransformerLayerWeights {
             ffn_layer_scale: format!("{prefix}.ffn_layer_scale.gamma"),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecF16Weights {
+    pub semantic_quantizer: CodecQuantizerF16Weights,
+    pub residual_quantizers: Vec<CodecQuantizerF16Weights>,
+}
+
+impl CodecF16Weights {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        let registry = CodecTensorRegistry::from_gguf(gguf)?;
+        Self::from_gguf_registry(gguf, &registry)
+    }
+
+    pub fn from_gguf_registry(gguf: &GgufFile, registry: &CodecTensorRegistry) -> Result<Self> {
+        let semantic_quantizer =
+            CodecQuantizerF16Weights::from_names(gguf, registry.semantic_quantizer(), true)?;
+        let residual_quantizers = registry
+            .residual_quantizers()
+            .iter()
+            .map(|names| CodecQuantizerF16Weights::from_names(gguf, names, false))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            semantic_quantizer,
+            residual_quantizers,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecQuantizerF16Weights {
+    pub index: usize,
+    pub in_proj_weight: F16TensorView,
+    pub in_proj_bias: F16TensorView,
+    pub out_proj_weight: F16TensorView,
+    pub out_proj_bias: F16TensorView,
+    pub codebook_weight: F16TensorView,
+}
+
+impl CodecQuantizerF16Weights {
+    fn from_names(gguf: &GgufFile, names: &CodecQuantizerWeights, semantic: bool) -> Result<Self> {
+        let weights = Self {
+            index: names.index,
+            in_proj_weight: F16TensorView::from_gguf(gguf, &names.in_proj_weight)?,
+            in_proj_bias: F16TensorView::from_gguf(gguf, &names.in_proj_bias)?,
+            out_proj_weight: F16TensorView::from_gguf(gguf, &names.out_proj_weight)?,
+            out_proj_bias: F16TensorView::from_gguf(gguf, &names.out_proj_bias)?,
+            codebook_weight: F16TensorView::from_gguf(gguf, &names.codebook_weight)?,
+        };
+        weights.validate_dimensions(semantic)?;
+        Ok(weights)
+    }
+
+    fn validate_dimensions(&self, semantic: bool) -> Result<()> {
+        let codebook_size = if semantic {
+            CODEC_SEMANTIC_CODEBOOK_SIZE as usize
+        } else {
+            CODEC_RESIDUAL_CODEBOOK_SIZE as usize
+        };
+        let expected = [
+            (
+                self.in_proj_weight.name(),
+                self.in_proj_weight.dimensions(),
+                vec![1, CODEC_HIDDEN_SIZE as usize, CODEC_PROJECTION_DIM as usize],
+            ),
+            (
+                self.in_proj_bias.name(),
+                self.in_proj_bias.dimensions(),
+                vec![CODEC_PROJECTION_DIM as usize],
+            ),
+            (
+                self.out_proj_weight.name(),
+                self.out_proj_weight.dimensions(),
+                vec![1, CODEC_PROJECTION_DIM as usize, CODEC_HIDDEN_SIZE as usize],
+            ),
+            (
+                self.out_proj_bias.name(),
+                self.out_proj_bias.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize],
+            ),
+            (
+                self.codebook_weight.name(),
+                self.codebook_weight.dimensions(),
+                vec![CODEC_PROJECTION_DIM as usize, codebook_size],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, actual, expected) in expected {
+            if actual != expected {
+                failures.push(format!("{name}: expected {expected:?}, got {actual:?}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(InferError::Message(format!(
+                "codec F16 quantizer shape validation failed:\n{}",
+                failures.join("\n")
+            )))
+        }
+    }
+
+    pub fn project_code(&self, code_id: u32, codebook_size: usize) -> Result<Vec<f32>> {
+        let code = embedding_lookup_rows(
+            self.codebook_weight.values(),
+            CODEC_PROJECTION_DIM as usize,
+            codebook_size,
+            &[code_id],
+        )?
+        .pop()
+        .ok_or_else(|| InferError::Message("codec codebook lookup returned no row".into()))?;
+        let mut projected = linear(
+            &code,
+            self.out_proj_weight.values(),
+            CODEC_PROJECTION_DIM as usize,
+            CODEC_HIDDEN_SIZE as usize,
+        )?;
+        add_bias(&mut projected, self.out_proj_bias.values())?;
+        Ok(projected)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecRvqLookupResult {
+    pub num_codebooks: u32,
+    pub n_frames: u32,
+    pub latent_dim: usize,
+    pub latents: Vec<f32>,
+}
+
+pub fn rvq_lookup_codes(
+    codes: &[i32],
+    num_codebooks: u32,
+    n_frames: u32,
+    weights: &CodecF16Weights,
+) -> Result<CodecRvqLookupResult> {
+    let expected_codebooks = (1 + weights.residual_quantizers.len()) as u32;
+    if num_codebooks != expected_codebooks {
+        return Err(InferError::Message(format!(
+            "codec codebook count mismatch: expected {expected_codebooks}, got {num_codebooks}"
+        )));
+    }
+    let num_codebooks_usize = usize::try_from(num_codebooks)
+        .map_err(|_| InferError::Message("num_codebooks overflows usize".into()))?;
+    let n_frames_usize = usize::try_from(n_frames)
+        .map_err(|_| InferError::Message("n_frames overflows usize".into()))?;
+    let expected_len = num_codebooks_usize
+        .checked_mul(n_frames_usize)
+        .ok_or_else(|| InferError::Message("codec codes length overflow".into()))?;
+    if codes.len() != expected_len {
+        return Err(InferError::Message(format!(
+            "codec codes length mismatch: expected {expected_len}, got {}",
+            codes.len()
+        )));
+    }
+
+    let latent_dim = CODEC_HIDDEN_SIZE as usize;
+    let mut latents = vec![0.0f32; n_frames_usize * latent_dim];
+    for frame in 0..n_frames_usize {
+        for codebook in 0..num_codebooks_usize {
+            let code = codes[codebook * n_frames_usize + frame];
+            if code < 0 {
+                return Err(InferError::Message(format!(
+                    "codec code must be non-negative, got {code}"
+                )));
+            }
+            let projected = if codebook == 0 {
+                weights
+                    .semantic_quantizer
+                    .project_code(code as u32, CODEC_SEMANTIC_CODEBOOK_SIZE as usize)?
+            } else {
+                weights.residual_quantizers[codebook - 1]
+                    .project_code(code as u32, CODEC_RESIDUAL_CODEBOOK_SIZE as usize)?
+            };
+            let frame_start = frame * latent_dim;
+            for (slot, value) in latents[frame_start..frame_start + latent_dim]
+                .iter_mut()
+                .zip(projected)
+            {
+                *slot += value;
+            }
+        }
+    }
+
+    Ok(CodecRvqLookupResult {
+        num_codebooks,
+        n_frames,
+        latent_dim,
+        latents,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +740,20 @@ fn metadata_value<'a>(gguf: &'a GgufFile, key: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+fn add_bias(output: &mut [f32], bias: &[f32]) -> Result<()> {
+    if output.len() != bias.len() {
+        return Err(InferError::Message(format!(
+            "bias length mismatch: output={} bias={}",
+            output.len(),
+            bias.len()
+        )));
+    }
+    for (slot, value) in output.iter_mut().zip(bias) {
+        *slot += value;
+    }
+    Ok(())
+}
+
 pub fn format_codec_dimensions(dimensions: &[u64]) -> String {
     dimensions
         .iter()
@@ -604,6 +809,32 @@ mod tests {
             residual.in_proj_weight,
             "quantizer.quantizer.quantizers.3.in_proj.weight"
         );
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn loads_codec_f16_weights_and_runs_rvq_lookup_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let weights = CodecF16Weights::from_gguf(&gguf).expect("codec f16 weights");
+        assert_eq!(
+            weights.semantic_quantizer.codebook_weight.dimensions(),
+            &[
+                CODEC_PROJECTION_DIM as usize,
+                CODEC_SEMANTIC_CODEBOOK_SIZE as usize
+            ]
+        );
+        assert_eq!(weights.residual_quantizers.len(), CODEC_RESIDUAL_QUANTIZERS);
+
+        let codes = vec![
+            3988, 29, 487, 925, 184, 865, 526, 924, 37, 12, 189, 460, 854, 549, 947, 935, 339, 39,
+            892, 855,
+        ];
+        let result = rvq_lookup_codes(&codes, 10, 2, &weights).expect("rvq lookup");
+        assert_eq!(result.latent_dim, CODEC_HIDDEN_SIZE as usize);
+        assert_eq!(result.latents.len(), 2 * CODEC_HIDDEN_SIZE as usize);
+        assert!(result.latents.iter().all(|value| value.is_finite()));
+        assert!(result.latents.iter().any(|value| value.abs() > 0.0));
     }
 
     #[test]

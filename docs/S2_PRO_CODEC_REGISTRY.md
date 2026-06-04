@@ -14,6 +14,12 @@ cargo run -q -p fish_s2_infer --bin fish_s2_codec_dump -- `
   --metadata-output .\output\s2-pro-f16-codec-metadata.tsv
 
 cargo test -p fish_s2_infer codec::tests::loads_local_codec_registry_from_gguf -- --ignored --nocapture
+cargo test -p fish_s2_infer codec::tests::loads_codec_f16_weights_and_runs_rvq_lookup_fixture -- --ignored --nocapture
+
+cargo run -q -p fish_s2_infer --bin fish_s2_rvq_lookup_dump -- `
+  --codec .\models\s2-pro-f16-codec-only.gguf `
+  --codes .\output\generated_codes_hi_rust.json `
+  --output .\output\rvq_lookup_hi_rust.json
 ```
 
 ## Codec Metadata
@@ -88,8 +94,27 @@ Both `quantizer.pre_module` and `quantizer.post_module` expose:
 | `{module}.layers.{0..7}.ffn_layer_scale.gamma` | `1024` |
 | `{module}.norm.weight` | `1024` |
 
+## RVQ Lookup Smoke
+
+Completed in Rust:
+
+- `CodecF16Weights::from_gguf(...)` binds semantic and residual codebook/projection tensors.
+- `rvq_lookup_codes(...)` maps codebook-major generated codes to per-frame 1024-d latents.
+- `fish_s2_rvq_lookup_dump` wrote `output/rvq_lookup_hi_rust.json` from `generated_codes_hi_rust.json`.
+
+Observed smoke stats for greedy `hi`, 2 frames:
+
+| Field | Value |
+|-------|------:|
+| `num_codebooks` | 10 |
+| `n_frames` | 2 |
+| `latent_dim` | 1024 |
+| `latent_len` | 2048 |
+| `latent_l2` | 84.9925936284213 |
+| `latent_mean_abs` | 1.4799805433885922 |
+| `latent_max_abs` | 7.035152435302734 |
+
 ## Next Slice
 
-- Add typed F16 views for the semantic and residual codebook/projection tensors.
-- Implement `rvq_lookup_codes(codes) -> quantized_latents` for a tiny generated-codes fixture.
 - Dump matching C++ RVQ/codebook lookup stats before porting decoder convolution/transformer math.
+- Then port RVQ pre/post module and decoder path.

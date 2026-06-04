@@ -121,11 +121,17 @@
 - [x] `fish_s2_infer::codec::CodecTensorRegistry::from_gguf(codec_gguf)`
   - Map codec tensors and metadata from `s2-pro-f16-codec-only.gguf`.
   - Acceptance: `fish_s2_codec_dump` writes `output/s2-pro-f16-codec-registry.tsv` plus metadata TSV; ignored local GGUF smoke validates 461 tensors, `encoder=128`, `quantizer=244`, `decoder=89`, semantic codebook `8x4096`, and residual quantizers `{0..8}` `8x1024`.
-- [ ] `fish_s2_infer::codec::CodecF16Weights::from_gguf(codec_gguf)`
+- [x] `fish_s2_infer::codec::CodecF16Weights::from_gguf(codec_gguf)`
   - Bind typed F16 views for semantic/residual codebooks and projection weights without expanding the full decoder yet.
-  - Acceptance: codebook/proj tensors load and validate shapes for generated-codes fixture.
-- [ ] `fish_s2_infer::codec::rvq_decode_codes(codes) -> acoustic_features`
-  - Port semantic/residual quantizer dequantization.
+  - Acceptance: ignored local GGUF smoke loads semantic/residual codebooks plus in/out projections and validates shapes.
+- [x] `fish_s2_infer::codec::rvq_lookup_codes(codes, weights) -> CodecRvqLookupResult`
+  - First RVQ slice: generated codebook-major codes -> per-frame 1024-d latent via codebook lookup, `out_proj`, bias, and residual sum.
+  - Acceptance: `fish_s2_rvq_lookup_dump` reads `output/generated_codes_hi_rust.json` and writes finite stats to `output/rvq_lookup_hi_rust.json` (`2 frames x 1024 latent`).
+- [ ] C++ RVQ lookup parity hook
+  - Add s2.cpp dump for the same codebook lookup/projection/sum stage before porting pre/post module math.
+  - Acceptance: Rust `rvq_lookup_hi_rust.json` stats/first values match C++ hook within tolerance.
+- [ ] `fish_s2_infer::codec::rvq_decode_latents(latents) -> acoustic_features`
+  - Port RVQ pre/post module and quantizer upsample/downsample path after lookup parity is pinned.
   - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook.
 - [ ] `fish_s2_infer::codec::decode_waveform(codes) -> Pcm/Wav`
   - Port post-module transformer/ConvNeXt/upsample path.
@@ -338,4 +344,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-04 — Codec/RVQ: codec GGUF registry + tensor/metadata dump; next: typed codec F16 weights + RVQ lookup fixture*
+*Last updated: 2026-06-04 — Codec/RVQ: typed codec F16 weights + RVQ lookup smoke; next: C++ RVQ lookup parity hook*

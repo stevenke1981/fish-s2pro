@@ -18,7 +18,8 @@ pub mod server;
 
 pub use attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape, SlowArKvCache};
 pub use codec::{
-    classify_codec_tensor, format_codec_dimensions, CodecQuantizerWeights, CodecTensorDumpRow,
+    classify_codec_tensor, format_codec_dimensions, rvq_lookup_codes, CodecF16Weights,
+    CodecQuantizerF16Weights, CodecQuantizerWeights, CodecRvqLookupResult, CodecTensorDumpRow,
     CodecTensorRegistry, CodecTensorRoleInfo, CodecTransformerLayerWeights, CODEC_ARCHITECTURE,
     CODEC_RESIDUAL_QUANTIZERS, CODEC_TRANSFORMER_LAYERS,
 };
