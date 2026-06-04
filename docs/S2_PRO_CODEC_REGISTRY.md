@@ -183,5 +183,5 @@ Upsample/ConvNeXt weights use ggml `[ne0, ne1, ne2]` indexing (`i0 + i1*ne0 + i2
 ## Next Slice
 
 - `decode_waveform(codes)` parity: `scripts/dump_waveform_parity.ps1` (greedy `hi`).
-- Add reference-prompt generated-codes parity fixtures.
+- Reference-prompt generated-codes parity is now pinned by `scripts/dump_reference_generated_codes_parity.ps1 -PromptCodesOnly` and `-SkipFixtureBuild -MaxNewTokens 1`.
 - `encode_reference_audio(wav)` for voice clone.

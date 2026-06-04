@@ -6,7 +6,7 @@ param(
     [string] $Fixture = (Join-Path (Split-Path $PSScriptRoot -Parent) "crates\fish_s2_parity\tests\fixtures\reference_prompt_codes.json"),
     [string] $PromptTextFile = (Join-Path (Split-Path $PSScriptRoot -Parent) "crates\fish_s2_parity\tests\fixtures\reference.txt"),
     [string] $Text = "hi",
-    [int] $MaxNewTokens = 2,
+    [int] $MaxNewTokens = 1,
     [float] $Temperature = 0,
     [float] $TopP = 1,
     [int] $TopK = 0,

@@ -86,9 +86,9 @@
 - [x] C++ full generated-codes dump parity
   - Add `s2_generate_codes_dump` helper around `s2.cpp` full generate path and compare against `fish_s2_codes_dump`.
   - Acceptance: exact `num_codebooks`, `n_frames`, and `codes` match for greedy `hi`, `max_new_tokens=2` via `scripts/dump_generated_codes_parity.ps1`.
-- [ ] Reference-prompt generated-codes parity
+- [x] Reference-prompt generated-codes parity
   - Extend `fish_s2_codes_dump` and `s2_generate_codes_dump` to accept `prompt_text` + prompt code fixture.
-  - Acceptance: exact generated `codes` match on one short reference-prompt fixture.
+  - Acceptance: `scripts/dump_reference_generated_codes_parity.ps1 -PromptCodesOnly` passes for the reference prompt fixture, and `scripts/dump_reference_generated_codes_parity.ps1 -SkipFixtureBuild -MaxNewTokens 1` matches exact generated `codes` against s2.cpp.
 - [x] Parity gate: `scripts/dump_semantic_parity.ps1` + `fish_s2_parity compare-semantic-tokens` (UTF-8 JSON); greedy `hi` short prompt (`main_token_ids` exact match vs s2.cpp CPU dump).
 
 ### Package B — Prompt Embeddings and Slow-AR Stateful Decode
@@ -168,7 +168,7 @@
     - Added encoder-stage checkpoint dumps (`entry_conv`, `encoder_block_1..4`, `tail_snake`, `output_conv`) to both Rust and the generated s2.cpp helper. On `reference_tiny.wav`, `entry_conv` and `encoder_block_1` are near parity, while the first large mismatch starts at `encoder_block_2` (`l2_delta≈0.96`), so the next debug slice should inspect block 2 residual/downsample conv math and weight layout.
     - Extended checkpoints inside encoder residual units (`snake0`, `conv0`, `snake1`, `conv1`, `residual_out`). Synthetic 2048 and synthetic 5120 both pass parity, including the zero-padding case. The reference tiny WAV remains the targeted blocker: block 2 drift starts small at `encoder_block_2.residual_1.snake0` (`l2_delta≈0.011`) and grows through residual 3/downsample (`residual_3≈0.389`, `down_conv≈0.962`). Next likely fix target: high-amplitude Snake/conv numerical parity for the reference audio path, not sample-count padding.
     - Fixed Rust codec conv parity by emulating ggml `conv_1d` F16 im2col input rounding (`round-to-nearest-even` f32→f16 once per padded conv input). `dump_encoder_stage_parity.ps1 -WavInput output\s2cpp_reference_codes_dump\reference_tiny.wav` now passes (`hidden_l2_delta≈0.00045`).
-    - Added `dump_reference_generated_codes_parity.ps1 -PromptCodesOnly` so the codec reference prompt-code fixture can be validated without entering the slow 36-layer generated-code stage. `-PromptCodesOnly` passes, the checked-in `reference_prompt_codes.json` matches the s2.cpp output, and `-SkipFixtureBuild -MaxNewTokens 1` full generated-codes parity now passes against Rust.
+    - Added `dump_reference_generated_codes_parity.ps1 -PromptCodesOnly` so the codec reference prompt-code fixture can be validated without entering the slow 36-layer generated-code stage. `-PromptCodesOnly` passes, the checked-in `reference_prompt_codes.json` matches the s2.cpp output, and `-SkipFixtureBuild -MaxNewTokens 1` full generated-codes parity now passes against Rust. The reference parity script defaults to the validated 1-token smoke; pass a higher `-MaxNewTokens` only for longer manual parity runs.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency

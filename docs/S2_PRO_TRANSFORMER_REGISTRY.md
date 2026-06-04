@@ -219,5 +219,5 @@ cargo clippy --all-targets -- -D warnings
 Next Phase 4 work:
 
 - Continue codec/RVQ from `docs/S2_PRO_CODEC_REGISTRY.md`: port quantizer upsample ConvTranspose + ConvNeXt, then decoder convolution/ConvNeXt.
-- Add reference-prompt generated-codes parity fixtures.
+- Reference-prompt generated-codes parity is pinned by `scripts/dump_reference_generated_codes_parity.ps1 -SkipFixtureBuild -MaxNewTokens 1`.
 - Add typed views for quantized weights needed by non-F16 model variants.
