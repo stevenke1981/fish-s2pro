@@ -340,23 +340,27 @@ mod tests {
         let hidden = [1.0, 0.0, 0.0, 0.0];
         let attention_norm = [0.5, 1.0, 1.0, 1.0];
         let head_norm = [std::f32::consts::FRAC_1_SQRT_2; 2];
-        let wqkv = row_major_weight(
+        let wqkv = output_major_weight(
             shape.hidden_size,
             shape.wqkv_out().unwrap(),
             &[
-                vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 3.0, 0.0],
-                vec![0.0; 8],
-                vec![0.0; 8],
-                vec![0.0; 8],
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.0; 4],
+                vec![0.0; 4],
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.0; 4],
+                vec![3.0, 0.0, 0.0, 0.0],
+                vec![0.0; 4],
             ],
         );
-        let output = row_major_weight(
+        let output = output_major_weight(
             shape.q_size().unwrap(),
             shape.hidden_size,
             &[
                 vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 2.0, 0.0],
                 vec![0.0; 4],
-                vec![0.0, 2.0, 0.0, 0.0],
                 vec![0.0; 4],
             ],
         );
@@ -462,11 +466,11 @@ mod tests {
         assert_close(cache.value_token(0, 0).unwrap(), &actual.value);
     }
 
-    fn row_major_weight(input_dim: usize, output_dim: usize, rows: &[Vec<f32>]) -> Vec<f32> {
-        assert_eq!(rows.len(), input_dim);
+    fn output_major_weight(input_dim: usize, output_dim: usize, rows: &[Vec<f32>]) -> Vec<f32> {
+        assert_eq!(rows.len(), output_dim);
         let mut values = Vec::with_capacity(input_dim * output_dim);
         for row in rows {
-            assert_eq!(row.len(), output_dim);
+            assert_eq!(row.len(), input_dim);
             values.extend_from_slice(row);
         }
         values

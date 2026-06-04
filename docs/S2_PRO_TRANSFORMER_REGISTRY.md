@@ -97,8 +97,9 @@ Phase 4.2 prep slice:
 - `fish_s2_infer::tensor::F16TensorView` validates GGUF tensor type/shape/byte
   length and decodes little-endian F16 payloads to `f32`.
 - `fish_s2_infer::tensor::rms_norm` implements scalar RMSNorm over one vector.
-- `fish_s2_infer::tensor::linear` implements scalar linear projection for
-  registry-style `[input_dim, output_dim]` weights.
+- `fish_s2_infer::tensor::linear` implements scalar linear projection for ggml
+  weights stored as `[output_dim, input_dim]` rows while GGUF shape metadata is
+  reported as `[input_dim, output_dim]`.
 - Ignored smoke test loads `norm.weight` from the local transformer GGUF as an
   F16 typed tensor.
 - `fish_s2_infer::attention::apply_rope_normal` implements the `ggml_rope_ext`
@@ -119,10 +120,12 @@ Phase 4.2 prep slice:
   Rust fixture, including len/L2/mean_abs/max_abs/first8 for normalized, Q, K,
   V, attention, projection, and final hidden state. This is the Rust side of the
   next C++ dump parity step.
-- `fish_s2_parity compare-slow-ar` compares two Slow-AR JSON stats dumps with
-  strict per-tensor len/L2/mean_abs/max_abs/first8 tolerances. It currently
-  validates the Rust dump format and will be reused once the matching s2.cpp dump
-  exists.
+- `scripts\dump_s2cpp_slow_ar_stats.ps1` patches a local ignored s2.cpp clone,
+  builds a standalone CPU `s2_slow_ar_dump` helper without the Crow/server
+  target, and writes the matching layer-local C++ JSON stats dump.
+- `fish_s2_parity compare-slow-ar` compares Rust and C++ Slow-AR JSON stats
+  dumps with strict per-tensor len/L2/mean_abs/max_abs/first8 tolerances tuned
+  for CPU ggml-vs-scalar `f32` drift.
 
 Root tensor specs:
 
@@ -171,13 +174,13 @@ cargo test -p fish_s2_infer slow_ar::tests::binds_local_layer0_f16_weights_and_r
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layer0_rust_stats.json
-cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_rust_stats.json .\output\slow_ar_layer0_rust_stats.json
+.\scripts\dump_s2cpp_slow_ar_stats.ps1
+cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_cpp_stats.json .\output\slow_ar_layer0_rust_stats.json
 cargo clippy --all-targets -- -D warnings
 ```
 
 Next Phase 4 work:
 
 - Add typed views for quantized weights needed by non-F16 model variants.
-- Add the C++ JSON stats dump for the layer 0 single-token fixture, feed it to
-  `fish_s2_parity compare-slow-ar`, then broaden from decode-only token to
-  prefill over multiple tokens.
+- Broaden the Slow-AR parity fixture from decode-only layer 0 to prefill over
+  multiple tokens.

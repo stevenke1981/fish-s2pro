@@ -121,11 +121,10 @@ pub fn linear(
     }
 
     let mut output = vec![0.0f32; output_dim];
-    for input_index in 0..input_dim {
-        let input_value = input[input_index];
-        let row = &weight[input_index * output_dim..(input_index + 1) * output_dim];
-        for output_index in 0..output_dim {
-            output[output_index] += input_value * row[output_index];
+    for output_index in 0..output_dim {
+        let row = &weight[output_index * input_dim..(output_index + 1) * input_dim];
+        for input_index in 0..input_dim {
+            output[output_index] += input[input_index] * row[input_index];
         }
     }
     Ok(output)
@@ -178,9 +177,9 @@ mod tests {
     }
 
     #[test]
-    fn linear_matches_in_out_weight_layout() {
+    fn linear_matches_ggml_output_input_weight_layout() {
         let output = linear(&[2.0, -1.0], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3).unwrap();
-        assert_close(&output, &[-2.0, -1.0, 0.0]);
+        assert_close(&output, &[0.0, 2.0, 4.0]);
     }
 
     #[test]

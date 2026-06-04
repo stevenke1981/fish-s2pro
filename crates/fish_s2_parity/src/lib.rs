@@ -101,10 +101,10 @@ pub struct SlowArTensorTolerance {
 impl Default for SlowArTensorTolerance {
     fn default() -> Self {
         Self {
-            max_l2_delta: 1e-3,
-            max_mean_abs_delta: 1e-5,
-            max_max_abs_delta: 1e-3,
-            max_first8_mae: 1e-5,
+            max_l2_delta: 2e-2,
+            max_mean_abs_delta: 5e-5,
+            max_max_abs_delta: 6e-3,
+            max_first8_mae: 1e-4,
         }
     }
 }
