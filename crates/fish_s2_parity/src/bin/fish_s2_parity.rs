@@ -2,8 +2,9 @@ use std::env;
 use std::process::ExitCode;
 
 use fish_s2_parity::{
-    compare_slow_ar_dump_files, compare_wav_files, metrics_from_wav_file, ParityError,
-    ParityTolerance, Result, SlowArTensorTolerance,
+    compare_fast_ar_frame_dump_files, compare_generated_codes_dump_files,
+    compare_semantic_token_dump_files, compare_slow_ar_dump_files, compare_wav_files,
+    metrics_from_wav_file, ParityError, ParityTolerance, Result, SlowArTensorTolerance,
 };
 
 fn main() -> ExitCode {
@@ -51,6 +52,50 @@ fn run() -> Result<()> {
                 Err(ParityError::Message("WAV parity failed".into()))
             }
         }
+        Some("compare-semantic-tokens") => {
+            let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let report = compare_semantic_token_dump_files(expected, actual)?;
+            println!("passed={}", report.passed);
+            for failure in &report.failures {
+                println!("failure={failure}");
+            }
+            if report.passed {
+                Ok(())
+            } else {
+                Err(ParityError::Message("semantic token parity failed".into()))
+            }
+        }
+        Some("compare-fast-ar-frame") => {
+            let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let report = compare_fast_ar_frame_dump_files(expected, actual)?;
+            println!("passed={}", report.passed);
+            for failure in &report.failures {
+                println!("failure={failure}");
+            }
+            if report.passed {
+                Ok(())
+            } else {
+                Err(ParityError::Message("Fast-AR frame parity failed".into()))
+            }
+        }
+        Some("compare-generated-codes") => {
+            let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let report = compare_generated_codes_dump_files(expected, actual)?;
+            println!("passed={}", report.passed);
+            for failure in &report.failures {
+                println!("failure={failure}");
+            }
+            if report.passed {
+                Ok(())
+            } else {
+                Err(ParityError::Message(
+                    "generated codebook parity failed".into(),
+                ))
+            }
+        }
         Some("compare-slow-ar") => {
             let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
             let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
@@ -81,6 +126,6 @@ fn run() -> Result<()> {
 }
 
 fn usage() -> String {
-    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>\n  fish_s2_parity compare-slow-ar <expected.json> <actual.json>"
+    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>\n  fish_s2_parity compare-slow-ar <expected.json> <actual.json>\n  fish_s2_parity compare-semantic-tokens <expected.json> <actual.json>\n  fish_s2_parity compare-fast-ar-frame <expected.json> <actual.json>\n  fish_s2_parity compare-generated-codes <expected.json> <actual.json>"
         .to_string()
 }

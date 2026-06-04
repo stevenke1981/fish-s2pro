@@ -14,6 +14,7 @@
 /output/
 /bin/s2.exe
 /bin/s2
+/terminals/
 
 # Editor/OS noise.
 .idea/

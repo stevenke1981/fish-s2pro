@@ -186,6 +186,332 @@ pub struct SlowArParityReport {
     pub failures: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SemanticTokenDump {
+    pub backend: String,
+    pub text: String,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: i32,
+    pub max_new_tokens: u32,
+    pub min_tokens_before_end: u32,
+    pub prompt_cols: i32,
+    pub main_token_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticTokenParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FastArFrameDump {
+    pub backend: String,
+    pub text: String,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: i32,
+    pub min_tokens_before_end: u32,
+    pub prompt_cols: i32,
+    pub main_token_id: u32,
+    pub slow_hidden: Vec<f32>,
+    pub codebook_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FastArFrameParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct GeneratedCodesDump {
+    pub backend: String,
+    pub text: String,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: i32,
+    pub max_new_tokens: u32,
+    pub min_tokens_before_end: u32,
+    pub prompt_cols: i32,
+    pub num_codebooks: u32,
+    pub n_frames: u32,
+    pub codes: Vec<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedCodesParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+}
+
+pub fn semantic_token_dump_from_file(path: impl AsRef<Path>) -> Result<SemanticTokenDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_semantic_token_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+) -> Result<SemanticTokenParityReport> {
+    let expected = semantic_token_dump_from_file(expected)?;
+    let actual = semantic_token_dump_from_file(actual)?;
+    Ok(compare_semantic_token_dumps(&expected, &actual))
+}
+
+pub fn fast_ar_frame_dump_from_file(path: impl AsRef<Path>) -> Result<FastArFrameDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_fast_ar_frame_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+) -> Result<FastArFrameParityReport> {
+    let expected = fast_ar_frame_dump_from_file(expected)?;
+    let actual = fast_ar_frame_dump_from_file(actual)?;
+    Ok(compare_fast_ar_frame_dumps(&expected, &actual))
+}
+
+pub fn generated_codes_dump_from_file(path: impl AsRef<Path>) -> Result<GeneratedCodesDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_generated_codes_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+) -> Result<GeneratedCodesParityReport> {
+    let expected = generated_codes_dump_from_file(expected)?;
+    let actual = generated_codes_dump_from_file(actual)?;
+    Ok(compare_generated_codes_dumps(&expected, &actual))
+}
+
+pub fn compare_generated_codes_dumps(
+    expected: &GeneratedCodesDump,
+    actual: &GeneratedCodesDump,
+) -> GeneratedCodesParityReport {
+    let mut failures = Vec::new();
+    if expected.text != actual.text {
+        failures.push(format!(
+            "text mismatch: expected {:?}, actual {:?}",
+            expected.text, actual.text
+        ));
+    }
+    if (expected.temperature - actual.temperature).abs() > 1e-6 {
+        failures.push(format!(
+            "temperature mismatch: expected {}, actual {}",
+            expected.temperature, actual.temperature
+        ));
+    }
+    if (expected.top_p - actual.top_p).abs() > 1e-6 {
+        failures.push(format!(
+            "top_p mismatch: expected {}, actual {}",
+            expected.top_p, actual.top_p
+        ));
+    }
+    if expected.top_k != actual.top_k {
+        failures.push(format!(
+            "top_k mismatch: expected {}, actual {}",
+            expected.top_k, actual.top_k
+        ));
+    }
+    if expected.max_new_tokens != actual.max_new_tokens {
+        failures.push(format!(
+            "max_new_tokens mismatch: expected {}, actual {}",
+            expected.max_new_tokens, actual.max_new_tokens
+        ));
+    }
+    if expected.min_tokens_before_end != actual.min_tokens_before_end {
+        failures.push(format!(
+            "min_tokens_before_end mismatch: expected {}, actual {}",
+            expected.min_tokens_before_end, actual.min_tokens_before_end
+        ));
+    }
+    if expected.prompt_cols != actual.prompt_cols {
+        failures.push(format!(
+            "prompt_cols mismatch: expected {}, actual {}",
+            expected.prompt_cols, actual.prompt_cols
+        ));
+    }
+    if expected.num_codebooks != actual.num_codebooks {
+        failures.push(format!(
+            "num_codebooks mismatch: expected {}, actual {}",
+            expected.num_codebooks, actual.num_codebooks
+        ));
+    }
+    if expected.n_frames != actual.n_frames {
+        failures.push(format!(
+            "n_frames mismatch: expected {}, actual {}",
+            expected.n_frames, actual.n_frames
+        ));
+    }
+    let expected_len = expected.num_codebooks as usize * expected.n_frames as usize;
+    if expected.codes.len() != expected_len {
+        failures.push(format!(
+            "expected codes length {} does not match num_codebooks*n_frames {expected_len}",
+            expected.codes.len()
+        ));
+    }
+    let actual_len = actual.num_codebooks as usize * actual.n_frames as usize;
+    if actual.codes.len() != actual_len {
+        failures.push(format!(
+            "actual codes length {} does not match num_codebooks*n_frames {actual_len}",
+            actual.codes.len()
+        ));
+    }
+    if expected.codes != actual.codes {
+        failures.push(format!(
+            "codes mismatch: expected {:?}, actual {:?}",
+            expected.codes, actual.codes
+        ));
+    }
+    GeneratedCodesParityReport {
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
+pub fn compare_fast_ar_frame_dumps(
+    expected: &FastArFrameDump,
+    actual: &FastArFrameDump,
+) -> FastArFrameParityReport {
+    let mut failures = Vec::new();
+    if expected.text != actual.text {
+        failures.push(format!(
+            "text mismatch: expected {:?}, actual {:?}",
+            expected.text, actual.text
+        ));
+    }
+    if (expected.temperature - actual.temperature).abs() > 1e-6 {
+        failures.push(format!(
+            "temperature mismatch: expected {}, actual {}",
+            expected.temperature, actual.temperature
+        ));
+    }
+    if (expected.top_p - actual.top_p).abs() > 1e-6 {
+        failures.push(format!(
+            "top_p mismatch: expected {}, actual {}",
+            expected.top_p, actual.top_p
+        ));
+    }
+    if expected.top_k != actual.top_k {
+        failures.push(format!(
+            "top_k mismatch: expected {}, actual {}",
+            expected.top_k, actual.top_k
+        ));
+    }
+    if expected.min_tokens_before_end != actual.min_tokens_before_end {
+        failures.push(format!(
+            "min_tokens_before_end mismatch: expected {}, actual {}",
+            expected.min_tokens_before_end, actual.min_tokens_before_end
+        ));
+    }
+    if expected.prompt_cols != actual.prompt_cols {
+        failures.push(format!(
+            "prompt_cols mismatch: expected {}, actual {}",
+            expected.prompt_cols, actual.prompt_cols
+        ));
+    }
+    if expected.main_token_id != actual.main_token_id {
+        failures.push(format!(
+            "main_token_id mismatch: expected {}, actual {}",
+            expected.main_token_id, actual.main_token_id
+        ));
+    }
+    if expected.slow_hidden.len() != actual.slow_hidden.len() {
+        failures.push(format!(
+            "slow_hidden length mismatch: expected {}, actual {}",
+            expected.slow_hidden.len(),
+            actual.slow_hidden.len()
+        ));
+    } else {
+        let mut max_abs = 0.0f64;
+        let mut l2 = 0.0f64;
+        for (a, b) in expected.slow_hidden.iter().zip(&actual.slow_hidden) {
+            let delta = f64::from(*a) - f64::from(*b);
+            max_abs = max_abs.max(delta.abs());
+            l2 += delta * delta;
+        }
+        l2 = l2.sqrt();
+        if max_abs > 1e-2 || l2 > 0.5 {
+            failures.push(format!(
+                "slow_hidden mismatch: max_abs={max_abs:.8} l2={l2:.8}"
+            ));
+        }
+    }
+    if expected.codebook_ids != actual.codebook_ids {
+        failures.push(format!(
+            "codebook_ids mismatch: expected {:?}, actual {:?}",
+            expected.codebook_ids, actual.codebook_ids
+        ));
+    }
+    FastArFrameParityReport {
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
+pub fn compare_semantic_token_dumps(
+    expected: &SemanticTokenDump,
+    actual: &SemanticTokenDump,
+) -> SemanticTokenParityReport {
+    let mut failures = Vec::new();
+    if expected.text != actual.text {
+        failures.push(format!(
+            "text mismatch: expected {:?}, actual {:?}",
+            expected.text, actual.text
+        ));
+    }
+    if (expected.temperature - actual.temperature).abs() > 1e-6 {
+        failures.push(format!(
+            "temperature mismatch: expected {}, actual {}",
+            expected.temperature, actual.temperature
+        ));
+    }
+    if (expected.top_p - actual.top_p).abs() > 1e-6 {
+        failures.push(format!(
+            "top_p mismatch: expected {}, actual {}",
+            expected.top_p, actual.top_p
+        ));
+    }
+    if expected.top_k != actual.top_k {
+        failures.push(format!(
+            "top_k mismatch: expected {}, actual {}",
+            expected.top_k, actual.top_k
+        ));
+    }
+    if expected.max_new_tokens != actual.max_new_tokens {
+        failures.push(format!(
+            "max_new_tokens mismatch: expected {}, actual {}",
+            expected.max_new_tokens, actual.max_new_tokens
+        ));
+    }
+    if expected.min_tokens_before_end != actual.min_tokens_before_end {
+        failures.push(format!(
+            "min_tokens_before_end mismatch: expected {}, actual {}",
+            expected.min_tokens_before_end, actual.min_tokens_before_end
+        ));
+    }
+    if expected.prompt_cols != actual.prompt_cols {
+        failures.push(format!(
+            "prompt_cols mismatch: expected {}, actual {}",
+            expected.prompt_cols, actual.prompt_cols
+        ));
+    }
+    if expected.main_token_ids != actual.main_token_ids {
+        failures.push(format!(
+            "main_token_ids mismatch: expected {:?}, actual {:?}",
+            expected.main_token_ids, actual.main_token_ids
+        ));
+    }
+    SemanticTokenParityReport {
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
 pub fn slow_ar_dump_from_file(path: impl AsRef<Path>) -> Result<SlowArDump> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
@@ -891,6 +1217,60 @@ mod tests {
             .failures
             .iter()
             .any(|f| f.contains("token0.block_hidden.max_abs")));
+    }
+
+    #[test]
+    fn compare_fast_ar_frame_dumps_exact_match() {
+        let dump = FastArFrameDump {
+            backend: "rust".into(),
+            text: "hi".into(),
+            temperature: 0.0,
+            top_p: 1.0,
+            top_k: 0,
+            min_tokens_before_end: 0,
+            prompt_cols: 42,
+            main_token_id: 155_666,
+            slow_hidden: vec![0.1, -0.2, 0.3],
+            codebook_ids: vec![100, 200, 300],
+        };
+        let report = compare_fast_ar_frame_dumps(&dump, &dump);
+        assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_semantic_token_dumps_exact_match() {
+        let dump = SemanticTokenDump {
+            backend: "rust".into(),
+            text: "hi".into(),
+            temperature: 0.0,
+            top_p: 1.0,
+            top_k: 0,
+            max_new_tokens: 4,
+            min_tokens_before_end: 0,
+            prompt_cols: 42,
+            main_token_ids: vec![151_678, 151_679],
+        };
+        let report = compare_semantic_token_dumps(&dump, &dump);
+        assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_generated_codes_dumps_exact_match() {
+        let dump = GeneratedCodesDump {
+            backend: "rust".into(),
+            text: "hi".into(),
+            temperature: 0.0,
+            top_p: 1.0,
+            top_k: 0,
+            max_new_tokens: 2,
+            min_tokens_before_end: 0,
+            prompt_cols: 42,
+            num_codebooks: 2,
+            n_frames: 2,
+            codes: vec![10, 11, 20, 21],
+        };
+        let report = compare_generated_codes_dumps(&dump, &dump);
+        assert!(report.passed, "{report:#?}");
     }
 
     #[test]

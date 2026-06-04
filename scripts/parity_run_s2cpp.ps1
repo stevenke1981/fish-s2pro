@@ -11,13 +11,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "Use-UnicodeEncoding.ps1")
+
 $root = Split-Path $PSScriptRoot -Parent
 if (-not $ModelsDir) { $ModelsDir = Join-Path $root "models" }
 if (-not $OutputDir) { $OutputDir = Join-Path $root "output" }
 if (-not $WorkDir) { $WorkDir = Join-Path $OutputDir "s2cpp_work" }
 if (-not $Text) {
     $promptFile = Join-Path $root "crates\fish_s2_parity\tests\fixtures\prompts.txt"
-    $Text = (Get-Content -LiteralPath $promptFile -TotalCount 1)
+    $Text = (Read-Utf8 $promptFile).Split([Environment]::NewLine)[0]
 }
 
 function Resolve-Executable {
@@ -107,12 +109,12 @@ finally {
 
 $hash = Get-FileHash -LiteralPath $golden -Algorithm SHA256
 $sidecar = "$golden.sha256"
-"$($hash.Hash)  golden.wav" | Set-Content -LiteralPath $sidecar -Encoding ascii
+Write-Utf8NoBom $sidecar "$($hash.Hash)  golden.wav"
 
 $metricsPath = "$golden.metrics.txt"
 if (Get-Command cargo -ErrorAction SilentlyContinue) {
-    cargo run -q -p fish_s2_parity -- metrics $golden |
-        Set-Content -LiteralPath $metricsPath -Encoding ascii
+    $metrics = cargo run -q -p fish_s2_parity -- metrics $golden 2>&1 | Out-String
+    Write-Utf8NoBom $metricsPath $metrics
 }
 
 Write-Host "Wrote:"

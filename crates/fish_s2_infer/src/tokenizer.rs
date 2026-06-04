@@ -11,8 +11,16 @@ pub struct TokenizedText {
     pub tokens: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S2TokenizerConfig {
+    pub im_start_id: u32,
+    pub im_end_id: u32,
+    pub voice_id: u32,
+}
+
 pub struct S2Tokenizer {
     tokenizer: Tokenizer,
+    config: S2TokenizerConfig,
 }
 
 impl S2Tokenizer {
@@ -28,7 +36,28 @@ impl S2Tokenizer {
                 path.display()
             ))
         })?;
-        Ok(Self { tokenizer })
+        let mut instance = Self {
+            tokenizer,
+            config: S2TokenizerConfig {
+                im_start_id: 0,
+                im_end_id: 0,
+                voice_id: 0,
+            },
+        };
+        instance.config = S2TokenizerConfig {
+            im_start_id: instance.special_token_id("<|im_start|>")?,
+            im_end_id: instance.special_token_id("<|im_end|>")?,
+            voice_id: instance.special_token_id("<|voice|>")?,
+        };
+        Ok(instance)
+    }
+
+    pub fn config(&self) -> S2TokenizerConfig {
+        self.config
+    }
+
+    pub fn encode_newline(&self) -> Result<Vec<u32>> {
+        Ok(self.encode("\n")?.ids)
     }
 
     pub fn encode(&self, text: &str) -> Result<TokenizedText> {
@@ -40,6 +69,17 @@ impl S2Tokenizer {
             ids: encoding.get_ids().to_vec(),
             tokens: encoding.get_tokens().to_vec(),
         })
+    }
+
+    fn special_token_id(&self, token: &str) -> Result<u32> {
+        let encoded = self.encode(token)?;
+        match encoded.ids.len() {
+            1 => Ok(encoded.ids[0]),
+            _ => Err(InferError::Message(format!(
+                "expected single token id for {token:?}, got {:?}",
+                encoded.ids
+            ))),
+        }
     }
 }
 

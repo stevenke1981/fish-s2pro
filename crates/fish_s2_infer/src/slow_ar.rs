@@ -1,9 +1,13 @@
+use std::path::Path;
+
 use fish_s2_core::gguf::GgufFile;
 
 use crate::attention::{apply_rope_normal, SlowArKvCache};
 use crate::error::{InferError, Result};
-use crate::registry::{ArGraphSpec, TransformerTensorRegistry};
-use crate::tensor::{linear, rms_norm, F16TensorView};
+use crate::registry::{
+    ArGraphSpec, DualArGraphSpec, TransformerTensorRegistry, SLOW_CONTEXT_LENGTH,
+};
+use crate::tensor::{embedding_lookup_rows, linear, rms_norm, F16TensorView};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlowArLayerShape {
@@ -228,6 +232,182 @@ pub struct SlowArOutputHeadF16Weights {
 pub struct SlowArLogitsOutput {
     pub normalized: Vec<f32>,
     pub logits: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowArStepResult {
+    pub hidden: Vec<f32>,
+    pub logits: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowArEmbeddingWeights {
+    pub semantic: F16TensorView,
+    pub codebook: F16TensorView,
+}
+
+impl SlowArEmbeddingWeights {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        let weights = Self {
+            semantic: F16TensorView::from_gguf(gguf, "embeddings.weight")?,
+            codebook: F16TensorView::from_gguf(gguf, "codebook_embeddings.weight")?,
+        };
+        weights.validate_dimensions()?;
+        Ok(weights)
+    }
+
+    fn validate_dimensions(&self) -> Result<()> {
+        let semantic_dims = self.semantic.dimensions();
+        if semantic_dims.len() != 2 {
+            return Err(InferError::Message(format!(
+                "embeddings.weight expected rank 2, got {semantic_dims:?}"
+            )));
+        }
+        let codebook_dims = self.codebook.dimensions();
+        if codebook_dims.len() != 2 || codebook_dims[0] != semantic_dims[0] {
+            return Err(InferError::Message(format!(
+                "codebook_embeddings.weight shape mismatch: semantic={semantic_dims:?} codebook={codebook_dims:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+pub struct SlowArState {
+    gguf: GgufFile,
+    registry: TransformerTensorRegistry,
+    graph: DualArGraphSpec,
+    shape: SlowArLayerShape,
+    embeddings: SlowArEmbeddingWeights,
+    output_head: SlowArOutputHeadF16Weights,
+    cache: SlowArKvCache,
+    n_past: usize,
+    max_seq_len: usize,
+}
+
+impl SlowArState {
+    pub fn open(transformer_path: impl AsRef<Path>, max_seq_len: usize) -> Result<Self> {
+        if max_seq_len == 0 {
+            return Err(InferError::Message("max_seq_len must be non-zero".into()));
+        }
+        let gguf = GgufFile::open(transformer_path.as_ref())
+            .map_err(|err| InferError::Message(err.to_string()))?;
+        let registry = TransformerTensorRegistry::from_gguf(&gguf)?;
+        let graph = registry.graph_spec().clone();
+        let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow)?;
+        let embeddings = SlowArEmbeddingWeights::from_gguf(&gguf)?;
+        let output_head = SlowArOutputHeadF16Weights::from_gguf(&gguf)?;
+        let cache = SlowArKvCache::new(graph.kv_cache, max_seq_len)?;
+        Ok(Self {
+            gguf,
+            registry,
+            graph,
+            shape,
+            embeddings,
+            output_head,
+            cache,
+            n_past: 0,
+            max_seq_len,
+        })
+    }
+
+    pub fn open_default_max_seq_len(transformer_path: impl AsRef<Path>) -> Result<Self> {
+        Self::open(transformer_path, SLOW_CONTEXT_LENGTH as usize)
+    }
+
+    pub fn graph_spec(&self) -> &DualArGraphSpec {
+        &self.graph
+    }
+
+    pub fn n_past(&self) -> usize {
+        self.n_past
+    }
+
+    pub fn reset(&mut self) {
+        self.n_past = 0;
+        let _ = SlowArKvCache::new(self.graph.kv_cache, self.max_seq_len)
+            .map(|cache| self.cache = cache);
+    }
+
+    pub fn prefill(&mut self, flat_tokens: &[i32]) -> Result<SlowArStepResult> {
+        self.eval(flat_tokens)
+    }
+
+    pub fn step(&mut self, flat_token: &[i32]) -> Result<SlowArStepResult> {
+        let codebook_dim = usize::try_from(self.graph.codebook_input_dim())
+            .map_err(|_| InferError::Message("codebook_input_dim overflows usize".into()))?;
+        if flat_token.len() != codebook_dim {
+            return Err(InferError::Message(format!(
+                "step token width mismatch: expected {codebook_dim}, got {}",
+                flat_token.len()
+            )));
+        }
+        self.eval(flat_token)
+    }
+
+    fn eval(&mut self, flat_tokens: &[i32]) -> Result<SlowArStepResult> {
+        let codebook_dim = usize::try_from(self.graph.codebook_input_dim())
+            .map_err(|_| InferError::Message("codebook_input_dim overflows usize".into()))?;
+        if !flat_tokens.len().is_multiple_of(codebook_dim) {
+            return Err(InferError::Message(format!(
+                "flat token length {} is not a multiple of codebook_dim {codebook_dim}",
+                flat_tokens.len()
+            )));
+        }
+        let n_tokens = flat_tokens.len() / codebook_dim;
+        if n_tokens == 0 {
+            return Err(InferError::Message("expected at least one token".into()));
+        }
+        if self.n_past + n_tokens > self.max_seq_len {
+            return Err(InferError::Message(format!(
+                "KV cache overflow: n_past={} n_tokens={} max_seq_len={}",
+                self.n_past, n_tokens, self.max_seq_len
+            )));
+        }
+
+        let hidden_tokens = embed_slow_ar_time_major(flat_tokens, &self.graph, &self.embeddings)?;
+        let start_position = self.n_past;
+        let outputs = if n_tokens == 1 {
+            let hidden = hidden_tokens
+                .first()
+                .ok_or_else(|| InferError::Message("missing embedded token".into()))?;
+            let block = forward_slow_ar_block_decode_layers(
+                &self.gguf,
+                &self.registry,
+                0,
+                self.registry.slow_layer_count(),
+                hidden,
+                &mut self.cache,
+                start_position,
+            )?;
+            vec![block]
+        } else {
+            forward_slow_ar_block_prefill_layers_cached(
+                &self.gguf,
+                &self.registry,
+                0,
+                self.registry.slow_layer_count(),
+                &hidden_tokens,
+                &mut self.cache,
+                start_position,
+            )?
+        };
+
+        let last_hidden = outputs
+            .last()
+            .ok_or_else(|| InferError::Message("Slow-AR produced no outputs".into()))?
+            .hidden
+            .clone();
+        // Match s2.cpp eval_cached: StepResult.hidden is last-token output after weights_.norm.
+        let logits_out = self
+            .output_head
+            .forward_logits(&last_hidden, self.shape.rms_norm_eps)?;
+        self.n_past = checked_add(self.n_past, n_tokens, "n_past")?;
+        Ok(SlowArStepResult {
+            hidden: logits_out.normalized,
+            logits: logits_out.logits,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -585,6 +765,29 @@ pub fn forward_slow_ar_block_prefill_layers(
     hidden_tokens: &[Vec<f32>],
     start_position: usize,
 ) -> Result<Vec<SlowArLayerBlockOutput>> {
+    let graph = registry.graph_spec();
+    let max_seq_len = checked_add(start_position, hidden_tokens.len(), "max_seq_len")?;
+    let mut cache = SlowArKvCache::new(graph.kv_cache, max_seq_len)?;
+    forward_slow_ar_block_prefill_layers_cached(
+        gguf,
+        registry,
+        layer_start,
+        layer_count,
+        hidden_tokens,
+        &mut cache,
+        start_position,
+    )
+}
+
+pub fn forward_slow_ar_block_prefill_layers_cached(
+    gguf: &GgufFile,
+    registry: &TransformerTensorRegistry,
+    layer_start: usize,
+    layer_count: usize,
+    hidden_tokens: &[Vec<f32>],
+    cache: &mut SlowArKvCache,
+    start_position: usize,
+) -> Result<Vec<SlowArLayerBlockOutput>> {
     if layer_count == 0 {
         return Err(InferError::Message(
             "layer_count must be greater than zero".into(),
@@ -600,21 +803,165 @@ pub fn forward_slow_ar_block_prefill_layers(
 
     let graph = registry.graph_spec();
     let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow)?;
-    let max_seq_len = checked_add(start_position, hidden_tokens.len(), "max_seq_len")?;
-    let mut cache = SlowArKvCache::new(graph.kv_cache, max_seq_len)?;
     let mut layer_hidden_tokens = hidden_tokens.to_vec();
     let mut outputs = Vec::new();
     for layer in layer_start..layer_end {
         let weights = SlowArLayerF16Weights::from_gguf_layer(gguf, registry, layer)?;
         outputs = weights.skeleton(shape).forward_block_prefill_sequence(
             &layer_hidden_tokens,
-            &mut cache,
+            cache,
             layer,
             start_position,
         )?;
         layer_hidden_tokens = outputs.iter().map(|output| output.hidden.clone()).collect();
     }
     Ok(outputs)
+}
+
+pub fn embed_slow_ar_time_major(
+    flat_tokens: &[i32],
+    graph: &DualArGraphSpec,
+    weights: &SlowArEmbeddingWeights,
+) -> Result<Vec<Vec<f32>>> {
+    let codebook_dim = usize::try_from(graph.codebook_input_dim())
+        .map_err(|_| InferError::Message("codebook_input_dim overflows usize".into()))?;
+    if !flat_tokens.len().is_multiple_of(codebook_dim) {
+        return Err(InferError::Message(format!(
+            "flat token length {} is not a multiple of codebook_dim {codebook_dim}",
+            flat_tokens.len()
+        )));
+    }
+    let n_tokens = flat_tokens.len() / codebook_dim;
+    let hidden_dim = weights.semantic.dimensions()[0];
+    let vocab_dim = weights.semantic.dimensions()[1];
+    let codebook_vocab = weights.codebook.dimensions()[1];
+    let num_codebooks = usize::try_from(graph.num_codebooks)
+        .map_err(|_| InferError::Message("num_codebooks overflows usize".into()))?;
+    let _codebook_size = usize::try_from(graph.codebook_size)
+        .map_err(|_| InferError::Message("codebook_size overflows usize".into()))?;
+    let sem_scale = if graph.scale_codebook_embeddings {
+        1.0f32 / (codebook_dim as f32).sqrt()
+    } else {
+        1.0f32
+    };
+
+    let mut hidden_tokens = Vec::with_capacity(n_tokens);
+    for token_index in 0..n_tokens {
+        let base = token_index * codebook_dim;
+        let semantic = flat_tokens[base];
+        if semantic < 0 {
+            return Err(InferError::Message(format!(
+                "semantic token id must be non-negative, got {semantic}"
+            )));
+        }
+        let semantic_id = semantic as u32;
+        let is_semantic =
+            semantic_id >= graph.semantic_begin_id && semantic_id <= graph.semantic_end_id;
+
+        let mut hidden = embedding_lookup_rows(
+            weights.semantic.values(),
+            hidden_dim,
+            vocab_dim,
+            &[semantic_id],
+        )?
+        .pop()
+        .ok_or_else(|| InferError::Message("semantic embedding row missing".into()))?;
+
+        if is_semantic {
+            let mut codebook_sum = vec![0.0f32; hidden_dim];
+            for codebook_index in 0..num_codebooks {
+                let raw = flat_tokens[base + 1 + codebook_index];
+                if raw < 0 {
+                    return Err(InferError::Message(format!(
+                        "codebook token must be non-negative, got {raw}"
+                    )));
+                }
+                let codebook_offset = u32::try_from(codebook_index)
+                    .map_err(|_| InferError::Message("codebook index overflows u32".into()))?
+                    .checked_mul(graph.codebook_size)
+                    .ok_or_else(|| InferError::Message("codebook offset overflow".into()))?;
+                let codebook_id = (raw as u32).checked_add(codebook_offset).ok_or_else(|| {
+                    InferError::Message("codebook embedding index overflow".into())
+                })?;
+                let row = embedding_lookup_rows(
+                    weights.codebook.values(),
+                    hidden_dim,
+                    codebook_vocab,
+                    &[codebook_id],
+                )?
+                .pop()
+                .ok_or_else(|| InferError::Message("codebook embedding row missing".into()))?;
+                for (slot, value) in codebook_sum.iter_mut().zip(row) {
+                    *slot += value;
+                }
+            }
+            for (slot, value) in hidden.iter_mut().zip(codebook_sum) {
+                *slot += value;
+            }
+        }
+
+        if graph.scale_codebook_embeddings {
+            let scale = if is_semantic { sem_scale } else { 1.0 };
+            for value in &mut hidden {
+                *value *= scale;
+            }
+        }
+
+        hidden_tokens.push(hidden);
+    }
+    Ok(hidden_tokens)
+}
+
+pub fn forward_slow_ar_block_decode_layers(
+    gguf: &GgufFile,
+    registry: &TransformerTensorRegistry,
+    layer_start: usize,
+    layer_count: usize,
+    hidden: &[f32],
+    cache: &mut SlowArKvCache,
+    position: usize,
+) -> Result<SlowArLayerBlockOutput> {
+    if layer_count == 0 {
+        return Err(InferError::Message(
+            "layer_count must be greater than zero".into(),
+        ));
+    }
+    let layer_end = checked_add(layer_start, layer_count, "layer_end")?;
+    if layer_end > registry.slow_layer_count() {
+        return Err(InferError::Message(format!(
+            "slow layer range out of bounds: start={layer_start} count={layer_count} available={}",
+            registry.slow_layer_count()
+        )));
+    }
+
+    let graph = registry.graph_spec();
+    let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow)?;
+    let mut current_hidden = hidden.to_vec();
+    let mut last_output = None;
+    for layer in layer_start..layer_end {
+        let weights = SlowArLayerF16Weights::from_gguf_layer(gguf, registry, layer)?;
+        let attention = weights.skeleton(shape).forward_decode_token(
+            &current_hidden,
+            cache,
+            layer,
+            position,
+        )?;
+        let feed_forward = weights
+            .skeleton(shape)
+            .forward_feed_forward(&attention.hidden)?;
+        let hidden = feed_forward.hidden.clone();
+        last_output = Some(SlowArLayerBlockOutput {
+            attention,
+            feed_forward,
+            hidden,
+        });
+        current_hidden = last_output
+            .as_ref()
+            .expect("layer output present")
+            .hidden
+            .clone();
+    }
+    last_output.ok_or_else(|| InferError::Message("decode produced no layer outputs".into()))
 }
 
 fn rms_norm_heads(input: &[f32], weight: &[f32], head_dim: usize, eps: f32) -> Result<Vec<f32>> {

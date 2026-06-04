@@ -19,21 +19,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "Use-UnicodeEncoding.ps1")
+
 $root = Split-Path $PSScriptRoot -Parent
 if (-not $S2CppDir) { $S2CppDir = Join-Path $root "output\s2.cpp-src" }
 if (-not $Transformer) { $Transformer = Join-Path $root "models\s2-pro-f16-transformer-only.gguf" }
 if (-not $Output) { $Output = Join-Path $root "output\slow_ar_layer0_cpp_stats.json" }
-
-function Read-Utf8 {
-    param([string] $Path)
-    return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
-}
-
-function Write-Utf8NoBom {
-    param([string] $Path, [string] $Text)
-    $encoding = [System.Text.UTF8Encoding]::new($false)
-    [System.IO.File]::WriteAllText($Path, $Text, $encoding)
-}
 
 function Add-IncludeOnce {
     param([string] $Text, [string] $Include)
@@ -839,6 +830,14 @@ set(GGML_CUDA $cudaOption CACHE BOOL "" FORCE)
 if(GGML_CUDA)
     set(CMAKE_CUDA_ARCHITECTURES "$CudaArch" CACHE STRING "" FORCE)
 $cudaUnsupportedCompilerLine
+    string(APPEND CMAKE_CUDA_FLAGS " -Xcompiler=/utf-8")
+endif()
+
+if(MSVC)
+    add_compile_options(
+        "`$<$<COMPILE_LANGUAGE:CXX>:/utf-8>"
+        "`$<$<COMPILE_LANGUAGE:C>:/utf-8>"
+    )
 endif()
 
 add_subdirectory("$($SourceDir.Replace('\', '/'))/ggml" ggml-build)

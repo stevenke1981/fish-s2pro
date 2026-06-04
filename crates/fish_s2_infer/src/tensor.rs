@@ -98,6 +98,42 @@ pub fn rms_norm(input: &[f32], weight: &[f32], eps: f32) -> Result<Vec<f32>> {
         .collect())
 }
 
+/// Row gather for embedding tables stored like ggml `get_rows` on `[hidden_dim, vocab_dim]`
+/// weights (linear layout: each row is one vocab/code index, length `hidden_dim`).
+pub fn embedding_lookup_rows(
+    weight: &[f32],
+    hidden_dim: usize,
+    vocab_dim: usize,
+    indices: &[u32],
+) -> Result<Vec<Vec<f32>>> {
+    let expected_weights = hidden_dim
+        .checked_mul(vocab_dim)
+        .ok_or_else(|| InferError::Message("embedding weight length overflow".to_string()))?;
+    if weight.len() != expected_weights {
+        return Err(InferError::Message(format!(
+            "embedding weight length mismatch: expected {expected_weights}, got {}",
+            weight.len()
+        )));
+    }
+    let mut outputs = Vec::with_capacity(indices.len());
+    for &index in indices {
+        let row = usize::try_from(index).map_err(|_| {
+            InferError::Message(format!("embedding index overflows usize: {index}"))
+        })?;
+        if row >= vocab_dim {
+            return Err(InferError::Message(format!(
+                "embedding index {row} out of range for vocab_dim {vocab_dim}"
+            )));
+        }
+        let start = row
+            .checked_mul(hidden_dim)
+            .ok_or_else(|| InferError::Message("embedding row offset overflow".into()))?;
+        let end = start + hidden_dim;
+        outputs.push(weight[start..end].to_vec());
+    }
+    Ok(outputs)
+}
+
 pub fn linear(
     input: &[f32],
     weight: &[f32],
