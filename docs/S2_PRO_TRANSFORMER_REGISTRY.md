@@ -107,6 +107,10 @@ Phase 4.2 prep slice:
   same logical dimensions as s2.cpp: `[head_dim, kv_heads, max_seq_len, layers]`.
 - `fish_s2_infer::attention::gqa_decode_attention` validates the 32h/8kv GQA
   repeat and single-step decode softmax path over cached K/V tokens.
+- `fish_s2_infer::slow_ar::SlowArLayerSkeleton` wires a toy single-token
+  decode layer through attention RMSNorm, WQKV split, QK norm, RoPE, KV write,
+  GQA attention, output projection, and residual add. This is a CPU shape/math
+  smoke, not full model-weight prefill/decode yet.
 
 Root tensor specs:
 
@@ -150,6 +154,7 @@ Validation:
 ```powershell
 cargo test --workspace
 cargo test -p fish_s2_infer attention::tests
+cargo test -p fish_s2_infer slow_ar::tests
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo clippy --all-targets -- -D warnings
@@ -158,5 +163,5 @@ cargo clippy --all-targets -- -D warnings
 Next Phase 4 work:
 
 - Add typed views for quantized weights needed by non-F16 model variants.
-- Implement the first CPU-only Slow-AR layer skeleton: attention norm, WQKV
-  split, QK norm, RoPE, KV write, GQA attention, output projection, and residual.
+- Bind `SlowArLayerSkeleton` to real registry/GGUF F16 tensors for a tiny local
+  forward fixture, then add C++ dump parity.
