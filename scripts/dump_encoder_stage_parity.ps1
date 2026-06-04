@@ -32,6 +32,7 @@ function Write-EncoderStageDumpMain {
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
@@ -282,6 +283,73 @@ json stage_summary_to_json(const StageSummary & summary) {
     return doc;
 }
 
+ggml_tensor * build_residual_unit_with_checkpoints(
+    ggml_context * ctx,
+    ggml_context * ctx_w,
+    const std::string & prefix,
+    const std::string & checkpoint_prefix,
+    ggml_tensor * x,
+    int dilation,
+    const std::function<void(const std::string &, ggml_tensor *)> & checkpoint) {
+    auto req = [&](const std::string & n) -> ggml_tensor * {
+        ggml_tensor * t = ggml_get_tensor(ctx_w, n.c_str());
+        if (!t) throw std::runtime_error("missing tensor: " + n);
+        return t;
+    };
+    ggml_tensor * y = s2::snake_activation(ctx, x, req(prefix + ".block.0.alpha"));
+    checkpoint(checkpoint_prefix + ".snake0", y);
+    y = s2::causal_conv_1d(ctx, req(prefix + ".block.1.conv.weight"), req(prefix + ".block.1.conv.bias"), y, 1, dilation);
+    checkpoint(checkpoint_prefix + ".conv0", y);
+    y = s2::snake_activation(ctx, y, req(prefix + ".block.2.alpha"));
+    checkpoint(checkpoint_prefix + ".snake1", y);
+    y = s2::causal_conv_1d(ctx, req(prefix + ".block.3.conv.weight"), req(prefix + ".block.3.conv.bias"), y, 1, 1);
+    checkpoint(checkpoint_prefix + ".conv1", y);
+    ggml_tensor * out = ggml_add(ctx, x, y);
+    checkpoint(checkpoint_prefix + ".residual_out", out);
+    return out;
+}
+
+ggml_tensor * build_encoder_block_with_checkpoints(
+    ggml_context * ctx,
+    s2::AudioCodec::Impl & impl,
+    const std::string & prefix,
+    int block_index,
+    ggml_tensor * x,
+    int stride,
+    int32_t n_transformer_layers,
+    s2::transformer_inputs & inp,
+    const std::function<void(const std::string &, ggml_tensor *)> & checkpoint) {
+    auto req = [&](const std::string & n) -> ggml_tensor * {
+        ggml_tensor * t = ggml_get_tensor(impl.ctx_w, n.c_str());
+        if (!t) throw std::runtime_error("missing tensor: " + n);
+        return t;
+    };
+    const std::string block_name = "encoder_block_" + std::to_string(block_index);
+    x = build_residual_unit_with_checkpoints(ctx, impl.ctx_w, prefix + ".0", block_name + ".residual_1", x, 1, checkpoint);
+    checkpoint(block_name + ".residual_1", x);
+    x = build_residual_unit_with_checkpoints(ctx, impl.ctx_w, prefix + ".1", block_name + ".residual_2", x, 3, checkpoint);
+    checkpoint(block_name + ".residual_2", x);
+    x = build_residual_unit_with_checkpoints(ctx, impl.ctx_w, prefix + ".2", block_name + ".residual_3", x, 9, checkpoint);
+    checkpoint(block_name + ".residual_3", x);
+    x = s2::snake_activation(ctx, x, req(prefix + ".3.alpha"));
+    checkpoint(block_name + ".snake", x);
+    x = s2::causal_conv_1d(ctx, req(prefix + ".4.conv.weight"), req(prefix + ".4.conv.bias"), x, stride, 1);
+    checkpoint(block_name + ".down_conv", x);
+
+    if (n_transformer_layers > 0) {
+        x = s2::build_transformer(ctx, impl.ctx_w, prefix + ".5", x,
+                                  impl.transformer_block_size,
+                                  impl.transformer_n_local_heads,
+                                  impl.transformer_head_dim,
+                                  impl.transformer_rope_base,
+                                  impl.transformer_norm_eps,
+                                  512,
+                                  inp);
+        checkpoint(block_name + ".transformer_norm", x);
+    }
+    return x;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -353,14 +421,16 @@ int main(int argc, char ** argv) {
                     (i < codec.impl_->encoder_transformer_layers.size())
                         ? codec.impl_->encoder_transformer_layers[i]
                         : 0;
-                x = s2::build_encoder_block(
+                x = build_encoder_block_with_checkpoints(
                     ctx,
                     *codec.impl_,
                     prefix,
+                    static_cast<int>(i + 1),
                     x,
                     codec.impl_->encoder_rates[i],
                     n_layers,
-                    enc_inp);
+                    enc_inp,
+                    checkpoint);
                 checkpoint("encoder_block_" + std::to_string(i + 1), x);
             }
 

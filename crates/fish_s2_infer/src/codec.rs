@@ -1140,7 +1140,14 @@ fn forward_codec_encoder_frontend_impl(
     )?;
 
     for (block, &stride) in weights.blocks.iter().zip(CODEC_ENCODER_RATES.iter()) {
-        current = forward_codec_encoder_block(&current, frames, channels, stride, block)?;
+        current = forward_codec_encoder_block(
+            &current,
+            frames,
+            channels,
+            stride,
+            block,
+            collect_checkpoints.then_some(&mut checkpoints),
+        )?;
         frames = encoder_downsample_output_frames(frames, stride)?;
         channels = encoder_block_output_channels(block.index)?;
         maybe_push_encoder_checkpoint(
@@ -1736,12 +1743,69 @@ fn forward_codec_encoder_block(
     channels: usize,
     stride: usize,
     weights: &CodecEncoderBlockF16Weights,
+    mut checkpoints: Option<&mut Vec<CodecEncoderFrontendCheckpoint>>,
 ) -> Result<Vec<f32>> {
     validate_frame_major_len("encoder block input", input, frames, channels)?;
-    let mut x = forward_codec_residual_unit(input, frames, channels, 1, &weights.residual_1)?;
-    x = forward_codec_residual_unit(&x, frames, channels, 3, &weights.residual_2)?;
-    x = forward_codec_residual_unit(&x, frames, channels, 9, &weights.residual_3)?;
+    let mut x = forward_codec_residual_unit_with_checkpoints(
+        input,
+        frames,
+        channels,
+        1,
+        &weights.residual_1,
+        &format!("encoder_block_{}.residual_1", weights.index),
+        &mut checkpoints,
+    )?;
+    maybe_push_encoder_block_checkpoint(
+        &mut checkpoints,
+        weights.index,
+        "residual_1",
+        frames,
+        channels,
+        &x,
+    )?;
+    x = forward_codec_residual_unit_with_checkpoints(
+        &x,
+        frames,
+        channels,
+        3,
+        &weights.residual_2,
+        &format!("encoder_block_{}.residual_2", weights.index),
+        &mut checkpoints,
+    )?;
+    maybe_push_encoder_block_checkpoint(
+        &mut checkpoints,
+        weights.index,
+        "residual_2",
+        frames,
+        channels,
+        &x,
+    )?;
+    x = forward_codec_residual_unit_with_checkpoints(
+        &x,
+        frames,
+        channels,
+        9,
+        &weights.residual_3,
+        &format!("encoder_block_{}.residual_3", weights.index),
+        &mut checkpoints,
+    )?;
+    maybe_push_encoder_block_checkpoint(
+        &mut checkpoints,
+        weights.index,
+        "residual_3",
+        frames,
+        channels,
+        &x,
+    )?;
     x = snake_activation_frame_major(&x, frames, channels, weights.snake_alpha.values())?;
+    maybe_push_encoder_block_checkpoint(
+        &mut checkpoints,
+        weights.index,
+        "snake",
+        frames,
+        channels,
+        &x,
+    )?;
     let out_channels = encoder_block_output_channels(weights.index)?;
     x = causal_conv_1d_frame_major(
         &x,
@@ -1755,11 +1819,19 @@ fn forward_codec_encoder_block(
         weights.down_conv_weight.values(),
         weights.down_conv_bias.values(),
     )?;
+    let out_frames = encoder_downsample_output_frames(frames, stride)?;
+    maybe_push_encoder_block_checkpoint(
+        &mut checkpoints,
+        weights.index,
+        "down_conv",
+        out_frames,
+        out_channels,
+        &x,
+    )?;
 
     if weights.transformer_layers.is_empty() {
         return Ok(x);
     }
-    let out_frames = encoder_downsample_output_frames(frames, stride)?;
     let mut tokens = x
         .chunks_exact(out_channels)
         .map(|chunk| chunk.to_vec())
@@ -1779,6 +1851,14 @@ fn forward_codec_encoder_block(
         *token = rms_norm(token, norm_weight.values(), CODEC_RVQ_NORM_EPS)?;
     }
     let hidden = tokens.into_iter().flatten().collect::<Vec<_>>();
+    maybe_push_encoder_block_checkpoint(
+        &mut checkpoints,
+        weights.index,
+        "transformer_norm",
+        out_frames,
+        out_channels,
+        &hidden,
+    )?;
     validate_frame_major_len(
         "encoder transformer output",
         &hidden,
@@ -1786,6 +1866,42 @@ fn forward_codec_encoder_block(
         out_channels,
     )?;
     Ok(hidden)
+}
+
+fn maybe_push_encoder_block_checkpoint(
+    checkpoints: &mut Option<&mut Vec<CodecEncoderFrontendCheckpoint>>,
+    block_index: usize,
+    stage: impl AsRef<str>,
+    frames: usize,
+    channels: usize,
+    hidden: &[f32],
+) -> Result<()> {
+    if let Some(checkpoints) = checkpoints.as_mut() {
+        maybe_push_encoder_checkpoint(
+            checkpoints,
+            true,
+            format!("encoder_block_{block_index}.{}", stage.as_ref()),
+            frames,
+            channels,
+            hidden,
+        )?;
+    }
+    Ok(())
+}
+
+fn maybe_push_named_encoder_checkpoint(
+    checkpoints: &mut Option<&mut Vec<CodecEncoderFrontendCheckpoint>>,
+    name: Option<String>,
+    frames: usize,
+    channels: usize,
+    hidden: &[f32],
+) -> Result<()> {
+    if let Some(name) = name {
+        if let Some(checkpoints) = checkpoints.as_mut() {
+            maybe_push_encoder_checkpoint(checkpoints, true, name, frames, channels, hidden)?;
+        }
+    }
+    Ok(())
 }
 
 fn encoder_downsample_output_frames(frames: usize, stride: usize) -> Result<usize> {
@@ -1934,9 +2050,57 @@ fn forward_codec_residual_unit(
     dilation: usize,
     weights: &CodecResidualUnitF16Weights,
 ) -> Result<Vec<f32>> {
+    let mut checkpoints = None;
+    forward_codec_residual_unit_impl(
+        input,
+        frames,
+        channels,
+        dilation,
+        weights,
+        None,
+        &mut checkpoints,
+    )
+}
+
+fn forward_codec_residual_unit_with_checkpoints(
+    input: &[f32],
+    frames: usize,
+    channels: usize,
+    dilation: usize,
+    weights: &CodecResidualUnitF16Weights,
+    checkpoint_prefix: &str,
+    checkpoints: &mut Option<&mut Vec<CodecEncoderFrontendCheckpoint>>,
+) -> Result<Vec<f32>> {
+    forward_codec_residual_unit_impl(
+        input,
+        frames,
+        channels,
+        dilation,
+        weights,
+        Some(checkpoint_prefix),
+        checkpoints,
+    )
+}
+
+fn forward_codec_residual_unit_impl(
+    input: &[f32],
+    frames: usize,
+    channels: usize,
+    dilation: usize,
+    weights: &CodecResidualUnitF16Weights,
+    checkpoint_prefix: Option<&str>,
+    checkpoints: &mut Option<&mut Vec<CodecEncoderFrontendCheckpoint>>,
+) -> Result<Vec<f32>> {
     validate_frame_major_len("residual unit input", input, frames, channels)?;
     let mut branch =
         snake_activation_frame_major(input, frames, channels, weights.snake0_alpha.values())?;
+    maybe_push_named_encoder_checkpoint(
+        checkpoints,
+        checkpoint_prefix.map(|prefix| format!("{prefix}.snake0")),
+        frames,
+        channels,
+        &branch,
+    )?;
     branch = causal_conv_1d_frame_major(
         &branch,
         Conv1dFrameMajorSpec {
@@ -1949,8 +2113,22 @@ fn forward_codec_residual_unit(
         weights.conv0_weight.values(),
         weights.conv0_bias.values(),
     )?;
+    maybe_push_named_encoder_checkpoint(
+        checkpoints,
+        checkpoint_prefix.map(|prefix| format!("{prefix}.conv0")),
+        frames,
+        channels,
+        &branch,
+    )?;
     branch =
         snake_activation_frame_major(&branch, frames, channels, weights.snake1_alpha.values())?;
+    maybe_push_named_encoder_checkpoint(
+        checkpoints,
+        checkpoint_prefix.map(|prefix| format!("{prefix}.snake1")),
+        frames,
+        channels,
+        &branch,
+    )?;
     branch = causal_conv_1d_frame_major(
         &branch,
         Conv1dFrameMajorSpec {
@@ -1963,7 +2141,22 @@ fn forward_codec_residual_unit(
         weights.conv1_weight.values(),
         weights.conv1_bias.values(),
     )?;
-    add_frame_major_residual(input, &branch)
+    maybe_push_named_encoder_checkpoint(
+        checkpoints,
+        checkpoint_prefix.map(|prefix| format!("{prefix}.conv1")),
+        frames,
+        channels,
+        &branch,
+    )?;
+    let output = add_frame_major_residual(input, &branch)?;
+    maybe_push_named_encoder_checkpoint(
+        checkpoints,
+        checkpoint_prefix.map(|prefix| format!("{prefix}.residual_out")),
+        frames,
+        channels,
+        &output,
+    )?;
+    Ok(output)
 }
 
 fn snake_activation_frame_major(
