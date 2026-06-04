@@ -902,6 +902,14 @@ pub struct CodecUpsampleResult {
     pub hidden: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecEncodeStageResult {
+    pub input_frames: u32,
+    pub output_frames: u32,
+    pub hidden_dim: usize,
+    pub hidden: Vec<f32>,
+}
+
 pub fn forward_codec_post_module(
     latents: &[f32],
     n_frames: u32,
@@ -931,6 +939,42 @@ pub fn forward_codec_post_module(
     }
     Ok(CodecPostModuleResult {
         n_frames,
+        hidden_dim,
+        hidden: tokens.into_iter().flatten().collect(),
+    })
+}
+
+pub fn forward_codec_quantizer_encode_stage(
+    latents: &[f32],
+    n_frames: u32,
+    downsample_weights: &CodecDownsampleF16Weights,
+    pre_weights: &CodecPreModuleF16Weights,
+) -> Result<CodecEncodeStageResult> {
+    let mut frames = usize::try_from(n_frames)
+        .map_err(|_| InferError::Message("n_frames overflows usize".into()))?;
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    validate_frame_major_len("codec quantizer encode input", latents, frames, hidden_dim)?;
+    let mut current = latents.to_vec();
+    for stage in &downsample_weights.stages {
+        current = forward_codec_downsample_stage(&current, frames, stage)?;
+        frames = downsample_output_frames(frames)?;
+    }
+    let mut tokens = current
+        .chunks_exact(hidden_dim)
+        .map(|chunk| chunk.to_vec())
+        .collect::<Vec<_>>();
+    for layer in &pre_weights.layers {
+        tokens = forward_codec_transformer_layer(&tokens, layer)?;
+    }
+    for token in &mut tokens {
+        *token = rms_norm(token, pre_weights.norm_weight.values(), CODEC_RVQ_NORM_EPS)?;
+    }
+    let output_frames = u32::try_from(frames).map_err(|_| {
+        InferError::Message("codec quantizer encode output_frames overflows u32".into())
+    })?;
+    Ok(CodecEncodeStageResult {
+        input_frames: n_frames,
+        output_frames,
         hidden_dim,
         hidden: tokens.into_iter().flatten().collect(),
     })
@@ -2223,6 +2267,84 @@ fn forward_codec_upsample_stage(
     forward_codec_convnext_block(&conv, frames * CODEC_UPSAMPLE_FACTOR, weights)
 }
 
+fn forward_codec_downsample_stage(
+    input: &[f32],
+    frames: usize,
+    weights: &CodecDownsampleStageF16Weights,
+) -> Result<Vec<f32>> {
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    validate_frame_major_len("codec downsample stage input", input, frames, hidden_dim)?;
+    let conv = causal_conv_1d_frame_major(
+        input,
+        Conv1dFrameMajorSpec {
+            frames,
+            in_ch: hidden_dim,
+            out_ch: hidden_dim,
+            stride: CODEC_UPSAMPLE_FACTOR,
+            dilation: 1,
+        },
+        weights.conv_weight.values(),
+        weights.conv_bias.values(),
+    )?;
+    forward_codec_downsample_convnext_block(&conv, downsample_output_frames(frames)?, weights)
+}
+
+fn downsample_output_frames(frames: usize) -> Result<usize> {
+    if frames < CODEC_UPSAMPLE_FACTOR {
+        return Err(InferError::Message(format!(
+            "codec downsample requires at least {} frames, got {frames}",
+            CODEC_UPSAMPLE_FACTOR
+        )));
+    }
+    Ok((frames - CODEC_UPSAMPLE_FACTOR) / CODEC_UPSAMPLE_FACTOR + 1)
+}
+
+fn forward_codec_downsample_convnext_block(
+    input: &[f32],
+    frames: usize,
+    weights: &CodecDownsampleStageF16Weights,
+) -> Result<Vec<f32>> {
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    validate_frame_major_len("codec downsample convnext input", input, frames, hidden_dim)?;
+    let mut x = depthwise_causal_conv1d(
+        input,
+        frames,
+        hidden_dim,
+        CODEC_CONVNEXT_KERNEL_SIZE,
+        weights.dwconv_weight.values(),
+        weights.dwconv_bias.values(),
+    )?;
+    layer_norm_affine_frame_major(
+        &mut x,
+        frames,
+        hidden_dim,
+        weights.norm_weight.values(),
+        weights.norm_bias.values(),
+        CODEC_CONVNEXT_NORM_EPS,
+    )?;
+    x = linear_bias_frame_major(
+        &x,
+        frames,
+        hidden_dim,
+        CODEC_CONVNEXT_EXPANDED_SIZE,
+        weights.pwconv1_weight.values(),
+        weights.pwconv1_bias.values(),
+    )?;
+    for value in &mut x {
+        *value = gelu_erf(*value);
+    }
+    x = linear_bias_frame_major(
+        &x,
+        frames,
+        CODEC_CONVNEXT_EXPANDED_SIZE,
+        hidden_dim,
+        weights.pwconv2_weight.values(),
+        weights.pwconv2_bias.values(),
+    )?;
+    scale_frame_major_channels(&mut x, hidden_dim, weights.convnext_gamma.values())?;
+    add_frame_major_residual(input, &x)
+}
+
 fn forward_codec_convnext_block(
     input: &[f32],
     frames: usize,
@@ -2786,6 +2908,37 @@ mod tests {
             pre_weights.norm_weight.dimensions(),
             &[CODEC_HIDDEN_SIZE as usize]
         );
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn runs_quantizer_encode_stage_on_synthetic_latents_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let registry = CodecTensorRegistry::from_gguf(&gguf).expect("codec registry");
+        let downsample_weights = CodecDownsampleF16Weights::from_gguf_registry(&gguf, &registry)
+            .expect("downsample f16 weights");
+        let pre_weights = CodecPreModuleF16Weights::from_gguf_registry(&gguf, &registry)
+            .expect("pre module f16 weights");
+
+        let input_frames = 8u32;
+        let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+        let latents = (0..input_frames as usize * hidden_dim)
+            .map(|index| ((index % 97) as f32 - 48.0) / 512.0)
+            .collect::<Vec<_>>();
+        let result = forward_codec_quantizer_encode_stage(
+            &latents,
+            input_frames,
+            &downsample_weights,
+            &pre_weights,
+        )
+        .expect("quantizer encode stage");
+        assert_eq!(result.input_frames, input_frames);
+        assert_eq!(result.output_frames, 2);
+        assert_eq!(result.hidden_dim, hidden_dim);
+        assert_eq!(result.hidden.len(), 2 * hidden_dim);
+        assert!(result.hidden.iter().all(|value| value.is_finite()));
+        assert!(result.hidden.iter().any(|value| value.abs() > 0.0));
     }
 
     #[test]

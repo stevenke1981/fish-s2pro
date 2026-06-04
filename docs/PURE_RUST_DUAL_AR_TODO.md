@@ -151,7 +151,8 @@
 - [ ] `fish_s2_infer::codec::encode_reference_audio(wav) -> prompt_codes`
   - Needed for voice clone/reference conditioning.
   - [x] Pre-slice: bind/validate `quantizer.downsample.{0,1}` ConvNeXt weights and `quantizer.pre_module` transformer F16 weights for the encode path.
-  - [ ] Port encoder frontend + quantizer downsample + pre-module forward.
+  - [x] Port quantizer downsample + pre-module forward from encoder latents to VQ input (`forward_codec_quantizer_encode_stage` synthetic-latent GGUF smoke).
+  - [ ] Port encoder frontend from mono PCM to 1024-d latent frames.
   - [ ] Port VQ nearest-code search for semantic + 9 residual codebooks.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
@@ -359,4 +360,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: waveform decode parity and reference generated-codes parity verified; next: Rust reference-audio encoder path*
+*Last updated: 2026-06-05 — Codec/RVQ: quantizer encode-stage downsample + pre-module forward smoke passes; next: Rust PCM encoder frontend and VQ search*
