@@ -290,6 +290,50 @@ pub struct RvqLookupParityReport {
     pub first8_mae: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PostModuleDump {
+    pub backend: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    pub num_codebooks: u32,
+    pub n_frames: u32,
+    pub hidden_dim: usize,
+    pub hidden_len: usize,
+    pub hidden_l2: f64,
+    pub hidden_mean_abs: f64,
+    pub hidden_max_abs: f64,
+    pub hidden_first8: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PostModuleTolerance {
+    pub max_l2_delta: f64,
+    pub max_mean_abs_delta: f64,
+    pub max_max_abs_delta: f64,
+    pub max_first8_mae: f64,
+}
+
+impl Default for PostModuleTolerance {
+    fn default() -> Self {
+        Self {
+            max_l2_delta: 5e-4,
+            max_mean_abs_delta: 5e-6,
+            max_max_abs_delta: 5e-5,
+            max_first8_mae: 5e-5,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PostModuleParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+    pub l2_delta: f64,
+    pub mean_abs_delta: f64,
+    pub max_abs_delta: f64,
+    pub first8_mae: f64,
+}
+
 pub fn semantic_token_dump_from_file(path: impl AsRef<Path>) -> Result<SemanticTokenDump> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
@@ -345,6 +389,21 @@ pub fn compare_rvq_lookup_dump_files(
     let expected = rvq_lookup_dump_from_file(expected)?;
     let actual = rvq_lookup_dump_from_file(actual)?;
     Ok(compare_rvq_lookup_dumps(&expected, &actual, tolerance))
+}
+
+pub fn post_module_dump_from_file(path: impl AsRef<Path>) -> Result<PostModuleDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_post_module_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+    tolerance: PostModuleTolerance,
+) -> Result<PostModuleParityReport> {
+    let expected = post_module_dump_from_file(expected)?;
+    let actual = post_module_dump_from_file(actual)?;
+    Ok(compare_post_module_dumps(&expected, &actual, tolerance))
 }
 
 pub fn compare_generated_codes_dumps(
@@ -511,6 +570,94 @@ pub fn compare_rvq_lookup_dumps(
     }
 
     RvqLookupParityReport {
+        passed: failures.is_empty(),
+        failures,
+        l2_delta,
+        mean_abs_delta,
+        max_abs_delta,
+        first8_mae,
+    }
+}
+
+pub fn compare_post_module_dumps(
+    expected: &PostModuleDump,
+    actual: &PostModuleDump,
+    tolerance: PostModuleTolerance,
+) -> PostModuleParityReport {
+    let mut failures = Vec::new();
+    if expected.text != actual.text {
+        failures.push(format!(
+            "text mismatch: expected {:?}, actual {:?}",
+            expected.text, actual.text
+        ));
+    }
+    let checks = [
+        (
+            "num_codebooks",
+            expected.num_codebooks as usize,
+            actual.num_codebooks as usize,
+        ),
+        (
+            "n_frames",
+            expected.n_frames as usize,
+            actual.n_frames as usize,
+        ),
+        ("hidden_dim", expected.hidden_dim, actual.hidden_dim),
+        ("hidden_len", expected.hidden_len, actual.hidden_len),
+    ];
+    for (name, expected, actual) in checks {
+        if expected != actual {
+            failures.push(format!(
+                "{name} mismatch: expected {expected}, actual {actual}"
+            ));
+        }
+    }
+
+    let expected_len = expected.n_frames as usize * expected.hidden_dim;
+    if expected.hidden_len != expected_len {
+        failures.push(format!(
+            "expected hidden_len {} does not match n_frames*hidden_dim {expected_len}",
+            expected.hidden_len
+        ));
+    }
+    let actual_len = actual.n_frames as usize * actual.hidden_dim;
+    if actual.hidden_len != actual_len {
+        failures.push(format!(
+            "actual hidden_len {} does not match n_frames*hidden_dim {actual_len}",
+            actual.hidden_len
+        ));
+    }
+
+    let l2_delta = (expected.hidden_l2 - actual.hidden_l2).abs();
+    let mean_abs_delta = (expected.hidden_mean_abs - actual.hidden_mean_abs).abs();
+    let max_abs_delta = (expected.hidden_max_abs - actual.hidden_max_abs).abs();
+    let first8_mae = first8_mae(&expected.hidden_first8, &actual.hidden_first8);
+    if l2_delta > tolerance.max_l2_delta {
+        failures.push(format!(
+            "hidden_l2 delta {l2_delta:.8} exceeds {:.8}",
+            tolerance.max_l2_delta
+        ));
+    }
+    if mean_abs_delta > tolerance.max_mean_abs_delta {
+        failures.push(format!(
+            "hidden_mean_abs delta {mean_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_mean_abs_delta
+        ));
+    }
+    if max_abs_delta > tolerance.max_max_abs_delta {
+        failures.push(format!(
+            "hidden_max_abs delta {max_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_max_abs_delta
+        ));
+    }
+    if first8_mae > tolerance.max_first8_mae {
+        failures.push(format!(
+            "hidden_first8 MAE {first8_mae:.8} exceeds {:.8}",
+            tolerance.max_first8_mae
+        ));
+    }
+
+    PostModuleParityReport {
         passed: failures.is_empty(),
         failures,
         l2_delta,
@@ -1460,6 +1607,48 @@ mod tests {
             .failures
             .iter()
             .any(|failure| failure.contains("latent_l2 delta")));
+    }
+
+    #[test]
+    fn compare_post_module_dumps_exact_match() {
+        let dump = PostModuleDump {
+            backend: "rust".into(),
+            text: Some("hi".into()),
+            num_codebooks: 10,
+            n_frames: 2,
+            hidden_dim: 1024,
+            hidden_len: 2048,
+            hidden_l2: 11.46,
+            hidden_mean_abs: 0.14,
+            hidden_max_abs: 5.61,
+            hidden_first8: vec![0.1, -0.2, 0.3],
+        };
+        let report = compare_post_module_dumps(&dump, &dump, PostModuleTolerance::default());
+        assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_post_module_dumps_reports_stat_delta() {
+        let expected = PostModuleDump {
+            backend: "s2.cpp".into(),
+            text: Some("hi".into()),
+            num_codebooks: 10,
+            n_frames: 2,
+            hidden_dim: 1024,
+            hidden_len: 2048,
+            hidden_l2: 11.0,
+            hidden_mean_abs: 0.1,
+            hidden_max_abs: 5.0,
+            hidden_first8: vec![0.0; 8],
+        };
+        let mut actual = expected.clone();
+        actual.hidden_l2 += 0.01;
+        let report = compare_post_module_dumps(&expected, &actual, PostModuleTolerance::default());
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("hidden_l2 delta")));
     }
 
     #[test]

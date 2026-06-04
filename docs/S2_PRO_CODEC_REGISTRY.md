@@ -27,6 +27,7 @@ cargo run -q -p fish_s2_infer --bin fish_s2_post_module_dump -- `
   --output .\output\post_module_hi_rust.json
 
 .\scripts\dump_rvq_lookup_parity.ps1
+.\scripts\dump_post_module_parity.ps1
 ```
 
 ## Codec Metadata
@@ -138,6 +139,7 @@ Completed in Rust:
 - `CodecPostModuleF16Weights::from_gguf(...)` binds the 8-layer `quantizer.post_module` transformer plus final norm.
 - `forward_codec_post_module(...)` runs short-sequence causal/windowed attention with RoPE, layer scale, FFN/SwiGLU, residuals, and final RMSNorm.
 - `fish_s2_post_module_dump` wrote `output/post_module_hi_rust.json` from the same generated-codes fixture.
+- `scripts/dump_post_module_parity.ps1` builds an s2.cpp `s2_post_module_dump` helper and stops exactly after `build_transformer(quantizer.post_module)`.
 
 Observed smoke stats for greedy `hi`, 2 frames:
 
@@ -150,7 +152,16 @@ Observed smoke stats for greedy `hi`, 2 frames:
 | `hidden_mean_abs` | 0.1456731767643955 |
 | `hidden_max_abs` | 5.619481086730957 |
 
+Observed C++ vs Rust post-module parity for the same fixture:
+
+| Field | Value |
+|-------|------:|
+| `hidden_l2_delta` | 0.00007342 |
+| `hidden_mean_abs_delta` | 0.00000143 |
+| `hidden_max_abs_delta` | 0.00004101 |
+| `hidden_first8_mae` | 0.00003685 |
+
 ## Next Slice
 
-- Add C++ post-module transformer parity hook before the quantizer upsample stages.
-- Then port quantizer upsample ConvTranspose + ConvNeXt and decoder convolution/ConvNeXt path.
+- Port quantizer upsample ConvTranspose + ConvNeXt and add a matching C++ parity hook.
+- Then port decoder convolution/ConvNeXt path.
