@@ -101,6 +101,12 @@ Phase 4.2 prep slice:
   registry-style `[input_dim, output_dim]` weights.
 - Ignored smoke test loads `norm.weight` from the local transformer GGUF as an
   F16 typed tensor.
+- `fish_s2_infer::attention::apply_rope_normal` implements the `ggml_rope_ext`
+  mode used by s2.cpp (`GGML_ROPE_TYPE_NORMAL`, adjacent-pair rotation).
+- `fish_s2_infer::attention::SlowArKvCache` provides a CPU smoke cache with the
+  same logical dimensions as s2.cpp: `[head_dim, kv_heads, max_seq_len, layers]`.
+- `fish_s2_infer::attention::gqa_decode_attention` validates the 32h/8kv GQA
+  repeat and single-step decode softmax path over cached K/V tokens.
 
 Root tensor specs:
 
@@ -143,6 +149,7 @@ Validation:
 
 ```powershell
 cargo test --workspace
+cargo test -p fish_s2_infer attention::tests
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo clippy --all-targets -- -D warnings
@@ -151,5 +158,5 @@ cargo clippy --all-targets -- -D warnings
 Next Phase 4 work:
 
 - Add typed views for quantized weights needed by non-F16 model variants.
-- Implement the first CPU-only single-layer or single-token forward smoke before
-  trying full prefill/decode.
+- Implement the first CPU-only Slow-AR layer skeleton: attention norm, WQKV
+  split, QK norm, RoPE, KV write, GQA attention, output projection, and residual.

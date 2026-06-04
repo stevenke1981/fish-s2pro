@@ -1,3 +1,4 @@
+pub mod attention;
 mod engine;
 mod error;
 mod paths;
@@ -9,6 +10,7 @@ mod wav;
 #[cfg(feature = "server")]
 pub mod server;
 
+pub use attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape, SlowArKvCache};
 pub use engine::{EngineConfig, InferenceEngine, SynthesisRequest};
 pub use error::{InferError, Result};
 pub use paths::{default_tokenizer_path, ensure_project_dirs, models_dir, project_root};
