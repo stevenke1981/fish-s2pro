@@ -219,6 +219,18 @@ pub struct SlowArLayerBlockOutput {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SlowArOutputHeadF16Weights {
+    pub norm: F16TensorView,
+    pub embeddings: F16TensorView,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowArLogitsOutput {
+    pub normalized: Vec<f32>,
+    pub logits: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct SlowArLayerPreparedToken {
     normalized: Vec<f32>,
     query: Vec<f32>,
@@ -514,6 +526,53 @@ impl SlowArLayerSkeleton<'_> {
                 "feed_forward_w3_weight",
             )?,
         )?;
+        Ok(())
+    }
+}
+
+impl SlowArOutputHeadF16Weights {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        let weights = Self {
+            norm: F16TensorView::from_gguf(gguf, "norm.weight")?,
+            embeddings: F16TensorView::from_gguf(gguf, "embeddings.weight")?,
+        };
+        weights.validate_dimensions()?;
+        Ok(weights)
+    }
+
+    pub fn forward_logits(&self, hidden: &[f32], rms_norm_eps: f32) -> Result<SlowArLogitsOutput> {
+        self.validate_dimensions()?;
+        let hidden_size = self.norm.dimensions()[0];
+        let vocab_size = self.embeddings.dimensions()[1];
+        let normalized = rms_norm(hidden, self.norm.values(), rms_norm_eps)?;
+        let logits = linear(
+            &normalized,
+            self.embeddings.values(),
+            hidden_size,
+            vocab_size,
+        )?;
+        Ok(SlowArLogitsOutput { normalized, logits })
+    }
+
+    fn validate_dimensions(&self) -> Result<()> {
+        let norm_dims = self.norm.dimensions();
+        if norm_dims.len() != 1 {
+            return Err(InferError::Message(format!(
+                "norm.weight dimensions mismatch: expected rank 1, got {norm_dims:?}"
+            )));
+        }
+        let embedding_dims = self.embeddings.dimensions();
+        if embedding_dims.len() != 2 {
+            return Err(InferError::Message(format!(
+                "embeddings.weight dimensions mismatch: expected rank 2, got {embedding_dims:?}"
+            )));
+        }
+        if embedding_dims[0] != norm_dims[0] {
+            return Err(InferError::Message(format!(
+                "output head hidden size mismatch: norm={} embeddings={}",
+                norm_dims[0], embedding_dims[0]
+            )));
+        }
         Ok(())
     }
 }

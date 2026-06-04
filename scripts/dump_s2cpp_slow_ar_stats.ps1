@@ -6,6 +6,8 @@ param(
     [int] $Layers = 1,
     [int] $Position = 0,
     [int] $Tokens = 1,
+    [switch] $Logits,
+    [int] $TopK = 8,
     [int] $Threads = 4,
     [switch] $Cuda,
     [int] $CudaDevice = 0,
@@ -65,6 +67,8 @@ function Patch-S2CppSource {
                                   int32_t layer_count,
                                   int32_t position,
                                   int32_t token_count,
+                                  bool include_logits,
+                                  int32_t top_k,
                                   int32_t n_threads);
 
 "@
@@ -79,6 +83,17 @@ function Patch-S2CppSource {
                                   int32_t n_threads);
 
 "@, $newHeaderMethod)
+    $header = $header.Replace(@"
+    // Dump a layer-local Slow-AR attention slice for Rust parity.
+    bool dump_slow_ar_layer_stats(const std::string & transformer_path_for_json,
+                                  const std::string & output_path,
+                                  int32_t layer,
+                                  int32_t layer_count,
+                                  int32_t position,
+                                  int32_t token_count,
+                                  int32_t n_threads);
+
+"@, $newHeaderMethod)
     if (-not $header.Contains("dump_slow_ar_layer_stats")) {
         $needle = "    const ModelHParams & hparams() const { return hparams_; }`r`n"
         $header = $header.Replace($needle, $newHeaderMethod + $needle)
@@ -86,6 +101,7 @@ function Patch-S2CppSource {
     Write-Utf8NoBom $headerPath $header
 
     $source = Read-Utf8 $sourcePath
+    $source = Add-IncludeOnce $source "#include <algorithm>"
     $source = Add-IncludeOnce $source "#include <cstdlib>"
     $source = Add-IncludeOnce $source "#include <fstream>"
     $source = Add-IncludeOnce $source "#include <iomanip>"
@@ -289,12 +305,41 @@ static std::vector<float> token_slice_s2_dump(const std::vector<float> & values,
                               values.begin() + static_cast<std::ptrdiff_t>(end));
 }
 
+static void write_top_logits_s2_dump(std::ostream & out,
+                                     const std::vector<float> & logits,
+                                     int32_t top_k,
+                                     bool comma) {
+    std::vector<std::pair<float, int32_t>> items;
+    items.reserve(logits.size());
+    for (int32_t i = 0; i < static_cast<int32_t>(logits.size()); ++i) {
+        items.push_back({logits[static_cast<size_t>(i)], i});
+    }
+    std::sort(items.begin(), items.end(), [](const auto & left, const auto & right) {
+        if (left.first == right.first) return left.second < right.second;
+        return left.first > right.first;
+    });
+    if (top_k < 0) top_k = 0;
+    items.resize(std::min<size_t>(items.size(), static_cast<size_t>(top_k)));
+
+    out << "  \"top_logits\": [\n";
+    for (size_t i = 0; i < items.size(); ++i) {
+        out << "    {\"token_id\": " << items[i].second << ", \"value\": " << items[i].first << "}";
+        if (i + 1 < items.size()) out << ",";
+        out << "\n";
+    }
+    out << "  ]";
+    if (comma) out << ",";
+    out << "\n";
+}
+
 bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_for_json,
                                            const std::string & output_path,
                                            int32_t layer_index,
                                            int32_t layer_count,
                                            int32_t position,
                                            int32_t token_count,
+                                           bool include_logits,
+                                           int32_t top_k,
                                            int32_t n_threads) {
     if (layer_index < 0 || layer_index >= static_cast<int32_t>(weights_.layers.size())) {
         std::fprintf(stderr, "[dump] layer out of range: %d\n", layer_index);
@@ -369,6 +414,8 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     ggml_tensor * dump_ffn_activated = nullptr;
     ggml_tensor * dump_ffn_projected = nullptr;
     ggml_tensor * dump_block_hidden = nullptr;
+    ggml_tensor * dump_final_normalized = nullptr;
+    ggml_tensor * dump_logits = nullptr;
 
     for (int32_t layer_offset = 0; layer_offset < layer_count; ++layer_offset) {
         const int32_t actual_layer_index = layer_index + layer_offset;
@@ -490,6 +537,19 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
         current_hidden = block_hidden;
     }
 
+    if (include_logits) {
+        ggml_tensor * final_normalized = rms_norm_weighted(ctx0, current_hidden, weights_.norm, hparams_.rms_norm_eps);
+        ggml_tensor * final_cont = ggml_cont(ctx0, final_normalized);
+        ggml_tensor * final_last = ggml_cpy(ctx0,
+            last_token_view(ctx0, final_cont, n_tokens),
+            ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, 1));
+        ggml_tensor * logits = mul_mat_checked(ctx0, weights_.embeddings, final_last, "mul_mat:dump_logits");
+        dump_final_normalized = ggml_cpy(ctx0, final_last,
+            ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, 1));
+        dump_logits = ggml_cpy(ctx0, logits,
+            ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams_.vocab_size, 1));
+    }
+
     ggml_build_forward_expand(gf, dump_normalized);
     ggml_build_forward_expand(gf, dump_query);
     ggml_build_forward_expand(gf, dump_key);
@@ -503,6 +563,10 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     ggml_build_forward_expand(gf, dump_ffn_activated);
     ggml_build_forward_expand(gf, dump_ffn_projected);
     ggml_build_forward_expand(gf, dump_block_hidden);
+    if (include_logits) {
+        ggml_build_forward_expand(gf, dump_final_normalized);
+        ggml_build_forward_expand(gf, dump_logits);
+    }
 
     if (!ggml_gallocr_alloc_graph(allocr_, gf)) {
         std::fprintf(stderr, "[dump] gallocr alloc failed\n");
@@ -561,6 +625,12 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     const std::vector<float> ffn_activated_values = tensor_to_f32_s2_dump(dump_ffn_activated);
     const std::vector<float> ffn_projected_values = tensor_to_f32_s2_dump(dump_ffn_projected);
     const std::vector<float> block_hidden_values = tensor_to_f32_s2_dump(dump_block_hidden);
+    std::vector<float> final_normalized_values;
+    std::vector<float> logits_values;
+    if (include_logits) {
+        final_normalized_values = tensor_to_f32_s2_dump(dump_final_normalized);
+        logits_values = tensor_to_f32_s2_dump(dump_logits);
+    }
     write_tensor_stats_values_s2_dump(out, "  ", "normalized", token_slice_s2_dump(normalized_values, 0, dim), true);
     write_tensor_stats_values_s2_dump(out, "  ", "query", token_slice_s2_dump(query_values, 0, q_size), true);
     write_tensor_stats_values_s2_dump(out, "  ", "key", token_slice_s2_dump(key_values, 0, kv_size), true);
@@ -573,7 +643,12 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     write_tensor_stats_values_s2_dump(out, "  ", "ffn_up", token_slice_s2_dump(ffn_up_values, 0, ffn_size), true);
     write_tensor_stats_values_s2_dump(out, "  ", "ffn_activated", token_slice_s2_dump(ffn_activated_values, 0, ffn_size), true);
     write_tensor_stats_values_s2_dump(out, "  ", "ffn_projected", token_slice_s2_dump(ffn_projected_values, 0, dim), true);
-    write_tensor_stats_values_s2_dump(out, "  ", "block_hidden", token_slice_s2_dump(block_hidden_values, 0, dim), n_tokens > 1);
+    write_tensor_stats_values_s2_dump(out, "  ", "block_hidden", token_slice_s2_dump(block_hidden_values, 0, dim), include_logits || n_tokens > 1);
+    if (include_logits) {
+        write_tensor_stats_values_s2_dump(out, "  ", "final_normalized", final_normalized_values, true);
+        write_tensor_stats_values_s2_dump(out, "  ", "logits", logits_values, true);
+        write_top_logits_s2_dump(out, logits_values, top_k, n_tokens > 1);
+    }
     if (n_tokens > 1) {
         out << "  \"sequence\": [\n";
         for (int32_t token = 0; token < n_tokens; ++token) {
@@ -640,12 +715,14 @@ struct Args {
     int layers = 1;
     int position = 0;
     int tokens = 1;
+    bool logits = false;
+    int top_k = 8;
     int threads = 4;
 };
 
 static void print_help() {
     std::cerr
-        << "Usage: s2_slow_ar_dump --transformer <transformer.gguf> --output <stats.json> [--layer 0] [--layers 1] [--position 0] [--tokens 1] [--threads 4]\n";
+        << "Usage: s2_slow_ar_dump --transformer <transformer.gguf> --output <stats.json> [--layer 0] [--layers 1] [--position 0] [--tokens 1] [--logits] [--top-k 8] [--threads 4]\n";
 }
 
 static bool parse_int(const char * label, const std::string & value, int & out) {
@@ -688,6 +765,11 @@ static bool parse_args(int argc, char ** argv, Args & args) {
         } else if (arg == "--tokens") {
             const char * value = need_value("--tokens");
             if (!value || !parse_int("--tokens", value, args.tokens)) return false;
+        } else if (arg == "--logits") {
+            args.logits = true;
+        } else if (arg == "--top-k") {
+            const char * value = need_value("--top-k");
+            if (!value || !parse_int("--top-k", value, args.top_k)) return false;
         } else if (arg == "--threads") {
             const char * value = need_value("--threads");
             if (!value || !parse_int("--threads", value, args.threads)) return false;
@@ -715,6 +797,10 @@ static bool parse_args(int argc, char ** argv, Args & args) {
         std::cerr << "--layers must be greater than zero\n";
         return false;
     }
+    if (args.top_k <= 0) {
+        std::cerr << "--top-k must be greater than zero\n";
+        return false;
+    }
     return true;
 }
 
@@ -730,7 +816,7 @@ int main(int argc, char ** argv) {
         std::cerr << "failed to load transformer: " << args.transformer << "\n";
         return 1;
     }
-    if (!model.dump_slow_ar_layer_stats(args.transformer, args.output, args.layer, args.layers, args.position, args.tokens, args.threads)) {
+    if (!model.dump_slow_ar_layer_stats(args.transformer, args.output, args.layer, args.layers, args.position, args.tokens, args.logits, args.top_k, args.threads)) {
         std::cerr << "failed to dump Slow-AR stats\n";
         return 1;
     }
@@ -822,14 +908,21 @@ if ($Cuda) {
     Remove-Item Env:\FISH_S2_CUDA_DEVICE -ErrorAction SilentlyContinue
 }
 
-& $exe.FullName `
-    --transformer $resolvedTransformer `
-    --output $resolvedOutput `
-    --layer $Layer `
-    --layers $Layers `
-    --position $Position `
-    --tokens $Tokens `
-    --threads $Threads
+$exeArgs = @(
+    "--transformer", $resolvedTransformer,
+    "--output", $resolvedOutput,
+    "--layer", "$Layer",
+    "--layers", "$Layers",
+    "--position", "$Position",
+    "--tokens", "$Tokens",
+    "--top-k", "$TopK",
+    "--threads", "$Threads"
+)
+if ($Logits) {
+    $exeArgs += "--logits"
+}
+
+& $exe.FullName @exeArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "Wrote $resolvedOutput"

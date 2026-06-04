@@ -103,6 +103,12 @@ pub struct SlowArDump {
     #[serde(default)]
     pub block_hidden: Option<TensorStats>,
     #[serde(default)]
+    pub final_normalized: Option<TensorStats>,
+    #[serde(default)]
+    pub logits: Option<TensorStats>,
+    #[serde(default)]
+    pub top_logits: Vec<TopLogit>,
+    #[serde(default)]
     pub sequence: Vec<SlowArTokenDump>,
 }
 
@@ -137,6 +143,12 @@ pub struct TensorStats {
     pub mean_abs: f64,
     pub max_abs: f64,
     pub first8: Vec<f64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TopLogit {
+    pub token_id: usize,
+    pub value: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -268,11 +280,75 @@ pub fn compare_slow_ar_dumps(
             }
         }
     }
+    if let Some(delta) = compare_optional_tensor_stats(
+        "final_normalized".to_string(),
+        &expected.final_normalized,
+        &actual.final_normalized,
+        tolerance,
+        &mut failures,
+    ) {
+        tensor_deltas.push(delta);
+    }
+    if let Some(delta) = compare_optional_tensor_stats(
+        "logits".to_string(),
+        &expected.logits,
+        &actual.logits,
+        logits_tolerance(tolerance),
+        &mut failures,
+    ) {
+        tensor_deltas.push(delta);
+    }
+    compare_top_logits(
+        &expected.top_logits,
+        &actual.top_logits,
+        tolerance,
+        &mut failures,
+    );
 
     SlowArParityReport {
         passed: failures.is_empty(),
         tensor_deltas,
         failures,
+    }
+}
+
+fn compare_top_logits(
+    expected: &[TopLogit],
+    actual: &[TopLogit],
+    tolerance: SlowArTensorTolerance,
+    failures: &mut Vec<String>,
+) {
+    if expected.is_empty() && actual.is_empty() {
+        return;
+    }
+    if expected.len() != actual.len() {
+        failures.push(format!(
+            "top_logits length mismatch: expected {}, actual {}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+        if expected.token_id != actual.token_id {
+            failures.push(format!(
+                "top_logits[{index}].token_id mismatch: expected {}, actual {}",
+                expected.token_id, actual.token_id
+            ));
+        }
+        let value_delta = (expected.value - actual.value).abs();
+        if value_delta > tolerance.max_max_abs_delta {
+            failures.push(format!(
+                "top_logits[{index}].value delta {value_delta:.8} exceeds {:.8}",
+                tolerance.max_max_abs_delta
+            ));
+        }
+    }
+}
+
+fn logits_tolerance(tolerance: SlowArTensorTolerance) -> SlowArTensorTolerance {
+    SlowArTensorTolerance {
+        max_l2_delta: tolerance.max_l2_delta.max(2.5),
+        ..tolerance
     }
 }
 

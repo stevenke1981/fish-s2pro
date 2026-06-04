@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use fish_s2_core::gguf::GgufFile;
 use fish_s2_infer::{
     forward_slow_ar_block_prefill_layers, SlowArLayerBlockOutput, SlowArLayerShape,
-    TransformerTensorRegistry,
+    SlowArOutputHeadF16Weights, TransformerTensorRegistry,
 };
 
 #[derive(Debug, serde::Serialize)]
@@ -30,6 +30,12 @@ struct Dump {
     ffn_activated: TensorStats,
     ffn_projected: TensorStats,
     block_hidden: TensorStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_normalized: Option<TensorStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logits: Option<TensorStats>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    top_logits: Vec<TopLogit>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     sequence: Vec<TokenDump>,
 }
@@ -50,6 +56,12 @@ struct TokenDump {
     ffn_activated: TensorStats,
     ffn_projected: TensorStats,
     block_hidden: TensorStats,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct TopLogit {
+    token_id: usize,
+    value: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -81,7 +93,21 @@ fn main() -> fish_s2_infer::Result<()> {
         args.position,
     )?;
 
-    let dump = build_dump(&args, shape, outputs);
+    let logits = if args.logits {
+        let last_hidden = outputs
+            .last()
+            .ok_or_else(|| fish_s2_infer::InferError::Message("no Slow-AR outputs".into()))?
+            .hidden
+            .clone();
+        Some(
+            SlowArOutputHeadF16Weights::from_gguf(&gguf)?
+                .forward_logits(&last_hidden, shape.rms_norm_eps)?,
+        )
+    } else {
+        None
+    };
+
+    let dump = build_dump(&args, shape, outputs, logits.as_ref());
     let json = serde_json::to_string_pretty(&dump)?;
     if let Some(path) = args.output {
         std::fs::write(path, json)?;
@@ -91,7 +117,12 @@ fn main() -> fish_s2_infer::Result<()> {
     Ok(())
 }
 
-fn build_dump(args: &Args, shape: SlowArLayerShape, outputs: Vec<SlowArLayerBlockOutput>) -> Dump {
+fn build_dump(
+    args: &Args,
+    shape: SlowArLayerShape,
+    outputs: Vec<SlowArLayerBlockOutput>,
+    logits: Option<&fish_s2_infer::SlowArLogitsOutput>,
+) -> Dump {
     let mut sequence = outputs
         .iter()
         .enumerate()
@@ -104,6 +135,9 @@ fn build_dump(args: &Args, shape: SlowArLayerShape, outputs: Vec<SlowArLayerBloc
     if args.tokens == 1 {
         sequence.clear();
     }
+    let final_normalized = logits.map(|logits| stats(&logits.normalized));
+    let logits_stats = logits.map(|logits| stats(&logits.logits));
+    let top_logits = logits.map_or_else(Vec::new, |logits| top_logits(&logits.logits, args.top_k));
     Dump {
         transformer: args.transformer.display().to_string(),
         layer: args.layer,
@@ -127,6 +161,9 @@ fn build_dump(args: &Args, shape: SlowArLayerShape, outputs: Vec<SlowArLayerBloc
         ffn_activated: first.ffn_activated,
         ffn_projected: first.ffn_projected,
         block_hidden: first.block_hidden,
+        final_normalized,
+        logits: logits_stats,
+        top_logits,
         sequence,
     }
 }
@@ -179,6 +216,25 @@ fn stats(values: &[f32]) -> TensorStats {
     }
 }
 
+fn top_logits(values: &[f32], count: usize) -> Vec<TopLogit> {
+    let mut top = values
+        .iter()
+        .enumerate()
+        .map(|(token_id, value)| TopLogit {
+            token_id,
+            value: *value,
+        })
+        .collect::<Vec<_>>();
+    top.sort_by(|left, right| {
+        right
+            .value
+            .total_cmp(&left.value)
+            .then_with(|| left.token_id.cmp(&right.token_id))
+    });
+    top.truncate(count.min(top.len()));
+    top
+}
+
 #[derive(Debug)]
 struct Args {
     transformer: PathBuf,
@@ -187,6 +243,8 @@ struct Args {
     layers: usize,
     position: usize,
     tokens: usize,
+    logits: bool,
+    top_k: usize,
 }
 
 impl Args {
@@ -197,6 +255,8 @@ impl Args {
         let mut layers = 1usize;
         let mut position = 0usize;
         let mut tokens = 1usize;
+        let mut logits = false;
+        let mut top_k = 8usize;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -206,6 +266,8 @@ impl Args {
                 "--layers" => layers = parse_nonzero_usize("--layers", args.next())?,
                 "--position" => position = parse_usize("--position", args.next())?,
                 "--tokens" => tokens = parse_nonzero_usize("--tokens", args.next())?,
+                "--logits" => logits = true,
+                "--top-k" => top_k = parse_nonzero_usize("--top-k", args.next())?,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -227,6 +289,8 @@ impl Args {
             layers,
             position,
             tokens,
+            logits,
+            top_k,
         })
     }
 }
@@ -251,6 +315,6 @@ fn parse_nonzero_usize(name: &str, value: Option<String>) -> fish_s2_infer::Resu
 
 fn print_help() {
     eprintln!(
-        "Usage: fish_s2_slow_ar_dump --transformer <s2-pro-*-transformer-only.gguf> [--output output.json] [--layer 0] [--layers 1] [--position 0] [--tokens 1]"
+        "Usage: fish_s2_slow_ar_dump --transformer <s2-pro-*-transformer-only.gguf> [--output output.json] [--layer 0] [--layers 1] [--position 0] [--tokens 1] [--logits] [--top-k 8]"
     );
 }

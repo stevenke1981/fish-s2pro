@@ -36,6 +36,123 @@
 
 ---
 
+## Remaining Modular Work Packages for Parallel Agents
+
+**Rough time left from 2026-06-04 status:**
+
+| Target | Estimate | What it means |
+|--------|----------|---------------|
+| Production without external `s2.exe` | 1-3 days | Finish Path A FFI/static-link backend; still uses C++/ggml in-process. |
+| Pure-Rust semantic token MVP | 1-2 weeks | Text/tokenizer -> Slow-AR semantic token generation on F16 CPU, no Fast-AR/codec WAV yet. |
+| Pure-Rust CPU end-to-end WAV | 4-8+ weeks | Slow-AR + Fast-AR + codec decode + integration, likely slow but C++ free. |
+| Pure-Rust performant GPU end-to-end | 8-12+ weeks | Adds quantized kernels and CUDA/Vulkan/WGPU-style backend parity/perf work. |
+
+**Current pure-Rust state:** tokenizer, GGUF tensor reads, Slow-AR F16 layer math, two-token full 36-layer hidden-state parity, and an opt-in logits/top-k dump path (`fish_s2_slow_ar_dump --logits`) exist. C++ CPU logits/top-k parity passes; CUDA logits parity is still pending.
+
+### Package A — Slow-AR Logits and Sampling
+
+- [x] `fish_s2_infer::slow_ar::SlowArOutputHeadF16Weights::from_gguf(gguf) -> Result<Self>`
+  - Inputs: `norm.weight`, tied `embeddings.weight`.
+  - Output: typed F16 views for final norm and vocab projection.
+  - Acceptance: ignored local GGUF smoke loads both tensors and validates `[2560]`, `[2560,155776]`.
+- [x] `fish_s2_infer::slow_ar::forward_logits(hidden, output_head, eps) -> SlowArLogitsOutput`
+  - Inputs: final 36-layer `block_hidden` for last token.
+  - Math: `rms_norm(hidden, norm.weight) -> linear(embeddings.weight, normalized)`.
+  - Acceptance: `fish_s2_slow_ar_dump --tokens 2 --layers 36 --logits` emits `final_normalized`, `logits`, and `top_logits`.
+- [x] `scripts/dump_s2cpp_slow_ar_stats.ps1 -Logits -TopK N` CPU path
+  - Add matching C++ dump fields after `weights_.norm` + `weights_.embeddings`.
+  - Acceptance: CPU compare passes against Rust for `slow_ar_layers0_36_*_logits.json`.
+- [ ] `scripts/dump_s2cpp_slow_ar_stats.ps1 -Cuda -Logits -TopK N`
+  - Validate the CUDA backend logits/top-k dump.
+  - Acceptance: CUDA compare passes against Rust for `slow_ar_layers0_36_*_logits_cuda.json`.
+- [x] `fish_s2_parity::compare_slow_ar_dumps` logits gate
+  - Compare optional `final_normalized`, `logits`, and exact-rank `top_logits.token_id`.
+  - Keep short-chain tolerances strict; allow full-stack accumulated drift only when `layer_count >= 36`.
+- [ ] `fish_s2_infer::sampling::semantic_mask_logits(logits, sem_begin, sem_end, im_end_id, block_end)`
+  - Match `s2_generate.cpp` semantic mask: only `[semantic_begin_id, semantic_end_id]` plus optional `im_end_id`.
+  - Acceptance: unit test verifies masked logits are `-inf` outside allowed IDs.
+- [ ] `fish_s2_infer::sampling::sample_token(logits, SamplerParams, always_include_id, rng)`
+  - Match s2.cpp top-k -> force-include EOS -> temperature softmax -> top-p -> discrete sample order.
+  - Acceptance: deterministic `temp=0`/greedy and seeded top-k/top-p unit tests.
+- [ ] `fish_s2_infer::slow_ar::generate_semantic_tokens(...)`
+  - Wires tokenizer prompt state -> Slow-AR prefill -> logits -> semantic sampling loop.
+  - Acceptance: greedy or fixed-seed semantic token sequence parity vs s2.cpp on a short prompt.
+
+### Package B — Prompt Embeddings and Slow-AR Stateful Decode
+
+- [ ] `fish_s2_infer::prompt::build_prompt_tensor(text_tokens, prompt_codes) -> PromptTensor`
+  - Match s2.cpp time-major layout: `(num_codebooks + 1) * n_tokens`.
+  - Acceptance: fixture transposes codebook-major prompt data exactly like `s2_generate.cpp`.
+- [ ] `fish_s2_infer::slow_ar::embed_slow_ar_tokens(flat_tokens, graph_spec, weights)`
+  - Math: semantic `embeddings.weight` + masked/summed `codebook_embeddings.weight`, optional `1/sqrt(num_codebooks+1)` scale.
+  - Acceptance: Rust embedding stats parity against s2.cpp prefill dump for one prompt token.
+- [ ] `fish_s2_infer::slow_ar::SlowArState`
+  - Owns KV cache, `n_past`, graph specs, layer/output-head weights.
+  - Functions: `prefill(flat_tokens)`, `step(flat_token)`, `reset()`.
+  - Acceptance: `prefill + step` hidden/logits parity vs C++ `SlowARModel::prefill/step`.
+
+### Package C — Fast-AR Codebook Decoder
+
+- [ ] `fish_s2_infer::fast_ar::FastArLayerF16Weights::from_gguf_layer(...)`
+  - Bind `fast_layers.N.*`, `fast_norm.weight`, `fast_output.weight`, `fast_embeddings.weight`.
+  - Acceptance: registry shape smoke for all 4 layers.
+- [ ] `fish_s2_infer::fast_ar::forward_codebook_prefix(hidden, prefix_codes)`
+  - Match `SlowARModel::fast_decode`: semantic hidden + prefix codebook embeddings -> 4-layer Fast-AR -> codebook logits.
+  - Acceptance: C++ dump hook for `fast_logits` and Rust parity for one prefix length.
+- [ ] `fish_s2_infer::fast_ar::generate_codebooks_for_semantic(hidden, semantic_code, sampler)`
+  - Generate remaining codebooks 1..9.
+  - Acceptance: fixed-seed or greedy codebook sequence parity vs s2.cpp for one semantic step.
+
+### Package D — Codec/RVQ Decode
+
+- [ ] `fish_s2_infer::codec::CodecTensorRegistry::from_gguf(codec_gguf)`
+  - Map codec tensors and metadata from `s2-pro-f16-codec-only.gguf`.
+  - Acceptance: tensor name/shape dump parity against `output/s2-pro-f16-codec-tensors.tsv`.
+- [ ] `fish_s2_infer::codec::rvq_decode_codes(codes) -> acoustic_features`
+  - Port semantic/residual quantizer dequantization.
+  - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook.
+- [ ] `fish_s2_infer::codec::decode_waveform(codes) -> Pcm/Wav`
+  - Port post-module transformer/ConvNeXt/upsample path.
+  - Acceptance: codec-only WAV envelope/SNR parity on a tiny code fixture.
+- [ ] `fish_s2_infer::codec::encode_reference_audio(wav) -> prompt_codes`
+  - Needed for voice clone/reference conditioning.
+  - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
+
+### Package E — Quantization and Memory Efficiency
+
+- [ ] `fish_s2_core::gguf::MappedTensorView`
+  - Avoid eagerly expanding huge tensors such as `embeddings.weight` to f32.
+  - Acceptance: logits path can run with streaming/mmap rows under bounded memory.
+- [ ] `fish_s2_infer::tensor::matvec_f16_streaming(input, f16_bytes, dims)`
+  - Compute output-head logits without allocating the full f32 embedding matrix.
+  - Acceptance: matches current F32-expanded output head stats.
+- [ ] `fish_s2_infer::tensor::{q8_0,q4_k_m}::matvec`
+  - Match ggml quantized matmul semantics for non-F16 GGUF variants.
+  - Acceptance: tiny synthetic ggml parity plus selected real tensor parity.
+
+### Package F — Integration Backend
+
+- [ ] `fish_s2_infer::pipeline::RustPipeline::load(model_dir, config)`
+  - Own tokenizer, transformer GGUF, codec GGUF, prompt/reference state.
+  - Acceptance: can load `models/` without `s2.exe` or C++ lib.
+- [ ] `fish_s2_infer::pipeline::RustPipeline::synthesize(request) -> WAV`
+  - Calls tokenizer -> Slow-AR -> Fast-AR -> codec.
+  - Acceptance: returns valid RIFF and passes Phase 0 envelope parity.
+- [ ] `fish_s2_infer::engine::Backend::{RustPure,Ffi,Subprocess}`
+  - Feature-gated backend selection with explicit logs.
+  - Acceptance: GUI/server can choose RustPure when complete, FFI/subprocess fallback otherwise.
+
+### Package G — GPU Acceleration
+
+- [ ] `fish_s2_infer::backend::MatmulBackend` trait
+  - CPU reference backend first; GPU backend later.
+  - Acceptance: Slow/Fast/codec ops call through backend abstraction where practical.
+- [ ] CUDA/Vulkan/WGPU spike for `matvec`, RMSNorm, RoPE, attention
+  - Start with output-head matvec and layer FFN matvec as highest-cost ops.
+  - Acceptance: one Slow-AR layer parity and measured speedup vs CPU.
+
+---
+
 ## Phase 0 — Baseline & golden tests (BLOCKER for everything)
 
 - [x] **0.1** Vendor pin: document exact `s2.cpp` commit hash used for parity in `docs/S2_CPP_PIN.md`.

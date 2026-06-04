@@ -22,6 +22,7 @@ pub use registry::{
 pub use slow_ar::{
     forward_slow_ar_block_prefill_layers, SlowArLayerBlockOutput, SlowArLayerF16Weights,
     SlowArLayerFeedForwardOutput, SlowArLayerForwardOutput, SlowArLayerShape, SlowArLayerSkeleton,
+    SlowArLogitsOutput, SlowArOutputHeadF16Weights,
 };
 pub use tensor::{linear, rms_norm, F16TensorView};
 pub use tokenizer::{bytelevel_encode_utf8, gpt2_byte_to_unicode, S2Tokenizer, TokenizedText};
