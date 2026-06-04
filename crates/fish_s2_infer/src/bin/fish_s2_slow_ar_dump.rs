@@ -11,6 +11,7 @@ struct Dump {
     transformer: String,
     layer: usize,
     position: usize,
+    token_count: usize,
     hidden_size: usize,
     head_count: usize,
     head_count_kv: usize,
@@ -22,9 +23,23 @@ struct Dump {
     attention: TensorStats,
     projected: TensorStats,
     hidden: TensorStats,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sequence: Vec<TokenDump>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
+struct TokenDump {
+    position: usize,
+    normalized: TensorStats,
+    query: TensorStats,
+    key: TensorStats,
+    value: TensorStats,
+    attention: TensorStats,
+    projected: TensorStats,
+    hidden: TensorStats,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct TensorStats {
     len: usize,
     l2: f32,
@@ -42,20 +57,18 @@ fn main() -> fish_s2_infer::Result<()> {
     let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow)?;
     let weights = SlowArLayerF16Weights::from_gguf_layer(&gguf, &registry, args.layer)?;
 
-    let mut hidden = vec![0.0f32; shape.hidden_size];
-    hidden[0] = 1.0;
-    hidden[1] = -0.5;
-    hidden[shape.hidden_size - 1] = 0.25;
-
-    let mut cache = SlowArKvCache::new(graph.kv_cache, args.position + 1)?;
-    let output = weights.skeleton(shape).forward_decode_token(
-        &hidden,
+    let hidden_tokens = (0..args.tokens)
+        .map(|index| hidden_fixture(shape.hidden_size, index))
+        .collect::<Vec<_>>();
+    let mut cache = SlowArKvCache::new(graph.kv_cache, args.position + args.tokens)?;
+    let outputs = weights.skeleton(shape).forward_decode_sequence(
+        &hidden_tokens,
         &mut cache,
         args.layer,
         args.position,
     )?;
 
-    let dump = build_dump(&args, shape, output);
+    let dump = build_dump(&args, shape, outputs);
     let json = serde_json::to_string_pretty(&dump)?;
     if let Some(path) = args.output {
         std::fs::write(path, json)?;
@@ -65,15 +78,46 @@ fn main() -> fish_s2_infer::Result<()> {
     Ok(())
 }
 
-fn build_dump(args: &Args, shape: SlowArLayerShape, output: SlowArLayerForwardOutput) -> Dump {
+fn build_dump(
+    args: &Args,
+    shape: SlowArLayerShape,
+    outputs: Vec<SlowArLayerForwardOutput>,
+) -> Dump {
+    let mut sequence = outputs
+        .iter()
+        .enumerate()
+        .map(|(offset, output)| build_token_dump(args.position + offset, output))
+        .collect::<Vec<_>>();
+    let first = sequence
+        .first()
+        .expect("at least one Slow-AR dump token")
+        .clone();
+    if args.tokens == 1 {
+        sequence.clear();
+    }
     Dump {
         transformer: args.transformer.display().to_string(),
         layer: args.layer,
         position: args.position,
+        token_count: args.tokens,
         hidden_size: shape.hidden_size,
         head_count: shape.head_count,
         head_count_kv: shape.head_count_kv,
         head_dim: shape.head_dim,
+        normalized: first.normalized,
+        query: first.query,
+        key: first.key,
+        value: first.value,
+        attention: first.attention,
+        projected: first.projected,
+        hidden: first.hidden,
+        sequence,
+    }
+}
+
+fn build_token_dump(position: usize, output: &SlowArLayerForwardOutput) -> TokenDump {
+    TokenDump {
+        position,
         normalized: stats(&output.normalized),
         query: stats(&output.query),
         key: stats(&output.key),
@@ -82,6 +126,14 @@ fn build_dump(args: &Args, shape: SlowArLayerShape, output: SlowArLayerForwardOu
         projected: stats(&output.projected),
         hidden: stats(&output.hidden),
     }
+}
+
+fn hidden_fixture(hidden_size: usize, token_index: usize) -> Vec<f32> {
+    let mut hidden = vec![0.0f32; hidden_size];
+    hidden[0] = 1.0;
+    hidden[1] = -0.5 + token_index as f32;
+    hidden[hidden_size - 1] = 0.25 + token_index as f32 * 0.125;
+    hidden
 }
 
 fn stats(values: &[f32]) -> TensorStats {
@@ -111,6 +163,7 @@ struct Args {
     output: Option<PathBuf>,
     layer: usize,
     position: usize,
+    tokens: usize,
 }
 
 impl Args {
@@ -119,6 +172,7 @@ impl Args {
         let mut output = None;
         let mut layer = 0usize;
         let mut position = 0usize;
+        let mut tokens = 1usize;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -126,6 +180,7 @@ impl Args {
                 "--output" => output = args.next().map(PathBuf::from),
                 "--layer" => layer = parse_usize("--layer", args.next())?,
                 "--position" => position = parse_usize("--position", args.next())?,
+                "--tokens" => tokens = parse_nonzero_usize("--tokens", args.next())?,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -145,6 +200,7 @@ impl Args {
             output,
             layer,
             position,
+            tokens,
         })
     }
 }
@@ -157,8 +213,18 @@ fn parse_usize(name: &str, value: Option<String>) -> fish_s2_infer::Result<usize
     })
 }
 
+fn parse_nonzero_usize(name: &str, value: Option<String>) -> fish_s2_infer::Result<usize> {
+    let value = parse_usize(name, value)?;
+    if value == 0 {
+        return Err(fish_s2_infer::InferError::Message(format!(
+            "{name} must be greater than zero"
+        )));
+    }
+    Ok(value)
+}
+
 fn print_help() {
     eprintln!(
-        "Usage: fish_s2_slow_ar_dump --transformer <s2-pro-*-transformer-only.gguf> [--output output.json] [--layer 0] [--position 0]"
+        "Usage: fish_s2_slow_ar_dump --transformer <s2-pro-*-transformer-only.gguf> [--output output.json] [--layer 0] [--position 0] [--tokens 1]"
     );
 }

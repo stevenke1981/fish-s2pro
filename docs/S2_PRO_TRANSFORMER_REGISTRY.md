@@ -119,18 +119,20 @@ Phase 4.2 prep slice:
   real local GGUF F16 tensors (`attention_norm`, `q_norm`, `k_norm`, `wqkv`,
   `wo`) and feeds them into the single-token skeleton. The ignored fixture loads
   layer 0 and checks shape consistency plus finite outputs.
-- `fish_s2_slow_ar_dump` writes JSON stats for the same layer 0 single-token
-  Rust fixture, including len/L2/mean_abs/max_abs/first8 for normalized, Q, K,
-  V, attention, projection, and final hidden state. This is the Rust side of the
-  next C++ dump parity step.
+- `fish_s2_slow_ar_dump` writes JSON stats for the same layer 0 Rust fixture,
+  including len/L2/mean_abs/max_abs/first8 for normalized, Q, K, V, attention,
+  projection, and final hidden state. `--tokens N` emits a `sequence` array with
+  per-token positions while keeping token 0 stats at the top level for backward
+  compatibility.
 - `scripts\dump_s2cpp_slow_ar_stats.ps1` patches a local ignored s2.cpp clone,
   builds a standalone `s2_slow_ar_dump` helper without the Crow/server target,
-  and writes the matching layer-local C++ JSON stats dump. It defaults to CPU
-  and also supports CUDA via `-Cuda -CudaDevice 0`; on Visual Studio 18/2026
-  with CUDA 12.6, add `-AllowUnsupportedCudaCompiler`.
+  and writes the matching layer-local C++ JSON stats dump. `-Tokens N` mirrors
+  the Rust sequence fixture. It defaults to CPU and also supports CUDA via
+  `-Cuda -CudaDevice 0`; on Visual Studio 18/2026 with CUDA 12.6, add
+  `-AllowUnsupportedCudaCompiler`.
 - `fish_s2_parity compare-slow-ar` compares Rust and C++ Slow-AR JSON stats
-  dumps with strict per-tensor len/L2/mean_abs/max_abs/first8 tolerances tuned
-  for CPU ggml-vs-scalar `f32` drift.
+  dumps with per-token tensor names such as `token1.key`. Tolerances are tuned
+  for ggml F16/RoPE vs Rust scalar `f32` drift across a two-token decode.
 
 Root tensor specs:
 
@@ -179,9 +181,12 @@ cargo test -p fish_s2_infer slow_ar::tests::binds_local_layer0_f16_weights_and_r
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layer0_rust_stats.json
+cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layer0_rust_seq2_stats.json --tokens 2
 .\scripts\dump_s2cpp_slow_ar_stats.ps1
+.\scripts\dump_s2cpp_slow_ar_stats.ps1 -Output .\output\slow_ar_layer0_cpp_seq2_stats.json -Tokens 2
 .\scripts\dump_s2cpp_slow_ar_stats.ps1 -Cuda -CudaDevice 0 -AllowUnsupportedCudaCompiler -Output .\output\slow_ar_layer0_cpp_stats_cuda.json
 cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_cpp_stats.json .\output\slow_ar_layer0_rust_stats.json
+cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_cpp_seq2_stats.json .\output\slow_ar_layer0_rust_seq2_stats.json
 cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_cpp_stats_cuda.json .\output\slow_ar_layer0_rust_stats.json
 cargo clippy --all-targets -- -D warnings
 ```

@@ -68,10 +68,33 @@ pub struct SlowArDump {
     pub transformer: String,
     pub layer: usize,
     pub position: usize,
+    #[serde(default)]
+    pub token_count: Option<usize>,
     pub hidden_size: usize,
     pub head_count: usize,
     pub head_count_kv: usize,
     pub head_dim: usize,
+    #[serde(default)]
+    pub normalized: Option<TensorStats>,
+    #[serde(default)]
+    pub query: Option<TensorStats>,
+    #[serde(default)]
+    pub key: Option<TensorStats>,
+    #[serde(default)]
+    pub value: Option<TensorStats>,
+    #[serde(default)]
+    pub attention: Option<TensorStats>,
+    #[serde(default)]
+    pub projected: Option<TensorStats>,
+    #[serde(default)]
+    pub hidden: Option<TensorStats>,
+    #[serde(default)]
+    pub sequence: Vec<SlowArTokenDump>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SlowArTokenDump {
+    pub position: usize,
     pub normalized: TensorStats,
     pub query: TensorStats,
     pub key: TensorStats,
@@ -101,17 +124,17 @@ pub struct SlowArTensorTolerance {
 impl Default for SlowArTensorTolerance {
     fn default() -> Self {
         Self {
-            max_l2_delta: 2e-2,
-            max_mean_abs_delta: 5e-5,
-            max_max_abs_delta: 6e-3,
-            max_first8_mae: 1e-4,
+            max_l2_delta: 6e-2,
+            max_mean_abs_delta: 1.5e-4,
+            max_max_abs_delta: 1.5e-2,
+            max_first8_mae: 6e-4,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SlowArTensorDelta {
-    pub name: &'static str,
+    pub name: String,
     pub l2_delta: f64,
     pub mean_abs_delta: f64,
     pub max_abs_delta: f64,
@@ -147,26 +170,103 @@ pub fn compare_slow_ar_dumps(
 ) -> SlowArParityReport {
     let mut failures = Vec::new();
     compare_metadata(expected, actual, &mut failures);
-    let pairs = [
-        ("normalized", &expected.normalized, &actual.normalized),
-        ("query", &expected.query, &actual.query),
-        ("key", &expected.key, &actual.key),
-        ("value", &expected.value, &actual.value),
-        ("attention", &expected.attention, &actual.attention),
-        ("projected", &expected.projected, &actual.projected),
-        ("hidden", &expected.hidden, &actual.hidden),
-    ];
+    let expected_tokens = normalized_slow_ar_tokens(expected, "expected", &mut failures);
+    let actual_tokens = normalized_slow_ar_tokens(actual, "actual", &mut failures);
+    if expected_tokens.len() != actual_tokens.len() {
+        failures.push(format!(
+            "token count mismatch: expected {}, actual {}",
+            expected_tokens.len(),
+            actual_tokens.len()
+        ));
+    }
 
-    let mut tensor_deltas = Vec::with_capacity(pairs.len());
-    for (name, expected, actual) in pairs {
-        let delta = compare_tensor_stats(name, expected, actual, tolerance, &mut failures);
-        tensor_deltas.push(delta);
+    let mut tensor_deltas = Vec::new();
+    for (token_index, (expected, actual)) in
+        expected_tokens.iter().zip(actual_tokens.iter()).enumerate()
+    {
+        if expected.position != actual.position {
+            failures.push(format!(
+                "token{token_index}.position mismatch: expected {}, actual {}",
+                expected.position, actual.position
+            ));
+        }
+        let pairs = [
+            ("normalized", &expected.normalized, &actual.normalized),
+            ("query", &expected.query, &actual.query),
+            ("key", &expected.key, &actual.key),
+            ("value", &expected.value, &actual.value),
+            ("attention", &expected.attention, &actual.attention),
+            ("projected", &expected.projected, &actual.projected),
+            ("hidden", &expected.hidden, &actual.hidden),
+        ];
+        for (name, expected, actual) in pairs {
+            let delta = compare_tensor_stats(
+                format!("token{token_index}.{name}"),
+                expected,
+                actual,
+                tolerance,
+                &mut failures,
+            );
+            tensor_deltas.push(delta);
+        }
     }
 
     SlowArParityReport {
         passed: failures.is_empty(),
         tensor_deltas,
         failures,
+    }
+}
+
+fn normalized_slow_ar_tokens(
+    dump: &SlowArDump,
+    side: &str,
+    failures: &mut Vec<String>,
+) -> Vec<SlowArTokenDump> {
+    if !dump.sequence.is_empty() {
+        if let Some(token_count) = dump.token_count {
+            if token_count != dump.sequence.len() {
+                failures.push(format!(
+                    "{side}.token_count mismatch: declared {token_count}, sequence has {}",
+                    dump.sequence.len()
+                ));
+            }
+        }
+        return dump.sequence.clone();
+    }
+    match (
+        &dump.normalized,
+        &dump.query,
+        &dump.key,
+        &dump.value,
+        &dump.attention,
+        &dump.projected,
+        &dump.hidden,
+    ) {
+        (
+            Some(normalized),
+            Some(query),
+            Some(key),
+            Some(value),
+            Some(attention),
+            Some(projected),
+            Some(hidden),
+        ) => vec![SlowArTokenDump {
+            position: dump.position,
+            normalized: normalized.clone(),
+            query: query.clone(),
+            key: key.clone(),
+            value: value.clone(),
+            attention: attention.clone(),
+            projected: projected.clone(),
+            hidden: hidden.clone(),
+        }],
+        _ => {
+            failures.push(format!(
+                "{side} Slow-AR dump has no top-level stats or sequence"
+            ));
+            Vec::new()
+        }
     }
 }
 
@@ -193,7 +293,7 @@ fn compare_metadata(expected: &SlowArDump, actual: &SlowArDump, failures: &mut V
 }
 
 fn compare_tensor_stats(
-    name: &'static str,
+    name: String,
     expected: &TensorStats,
     actual: &TensorStats,
     tolerance: SlowArTensorTolerance,
@@ -522,16 +622,34 @@ mod tests {
         assert!(report.passed);
         assert!(report.failures.is_empty());
         assert_eq!(report.tensor_deltas.len(), 7);
+        assert_eq!(report.tensor_deltas[0].name, "token0.normalized");
     }
 
     #[test]
     fn reports_slow_ar_tensor_delta_failure() {
         let expected: SlowArDump = serde_json::from_str(test_slow_ar_dump_json()).unwrap();
         let mut actual = expected.clone();
-        actual.query.l2 += 0.1;
+        actual.query.as_mut().unwrap().l2 += 0.1;
         let report = compare_slow_ar_dumps(&expected, &actual, SlowArTensorTolerance::default());
         assert!(!report.passed);
-        assert!(report.failures.iter().any(|f| f.contains("query.l2")));
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.contains("token0.query.l2")));
+    }
+
+    #[test]
+    fn compares_slow_ar_sequence_dumps() {
+        let expected: SlowArDump = serde_json::from_str(test_slow_ar_sequence_dump_json()).unwrap();
+        let mut actual = expected.clone();
+        actual.sequence[1].hidden.l2 += 0.1;
+        let report = compare_slow_ar_dumps(&expected, &actual, SlowArTensorTolerance::default());
+        assert!(!report.passed);
+        assert_eq!(report.tensor_deltas.len(), 14);
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.contains("token1.hidden.l2")));
     }
 
     #[test]
@@ -587,6 +705,48 @@ mod tests {
           "attention": {"len": 4, "l2": 4.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0, 3.0, 0.0]},
           "projected": {"len": 4, "l2": 5.0, "mean_abs": 2.25, "max_abs": 6.0, "first8": [3.0, 6.0, 0.0, 0.0]},
           "hidden": {"len": 4, "l2": 6.0, "mean_abs": 2.5, "max_abs": 6.0, "first8": [4.0, 6.0, 0.0, 0.0]}
+        }"#
+    }
+
+    fn test_slow_ar_sequence_dump_json() -> &'static str {
+        r#"{
+          "transformer": "model.gguf",
+          "layer": 0,
+          "position": 0,
+          "token_count": 2,
+          "hidden_size": 4,
+          "head_count": 2,
+          "head_count_kv": 1,
+          "head_dim": 2,
+          "normalized": {"len": 4, "l2": 1.0, "mean_abs": 0.25, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 0.0]},
+          "query": {"len": 4, "l2": 2.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 1.0]},
+          "key": {"len": 2, "l2": 1.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0]},
+          "value": {"len": 2, "l2": 3.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0]},
+          "attention": {"len": 4, "l2": 4.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0, 3.0, 0.0]},
+          "projected": {"len": 4, "l2": 5.0, "mean_abs": 2.25, "max_abs": 6.0, "first8": [3.0, 6.0, 0.0, 0.0]},
+          "hidden": {"len": 4, "l2": 6.0, "mean_abs": 2.5, "max_abs": 6.0, "first8": [4.0, 6.0, 0.0, 0.0]},
+          "sequence": [
+            {
+              "position": 0,
+              "normalized": {"len": 4, "l2": 1.0, "mean_abs": 0.25, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 0.0]},
+              "query": {"len": 4, "l2": 2.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 1.0]},
+              "key": {"len": 2, "l2": 1.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0]},
+              "value": {"len": 2, "l2": 3.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0]},
+              "attention": {"len": 4, "l2": 4.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0, 3.0, 0.0]},
+              "projected": {"len": 4, "l2": 5.0, "mean_abs": 2.25, "max_abs": 6.0, "first8": [3.0, 6.0, 0.0, 0.0]},
+              "hidden": {"len": 4, "l2": 6.0, "mean_abs": 2.5, "max_abs": 6.0, "first8": [4.0, 6.0, 0.0, 0.0]}
+            },
+            {
+              "position": 1,
+              "normalized": {"len": 4, "l2": 1.1, "mean_abs": 0.25, "max_abs": 1.0, "first8": [1.0, 0.1, 0.0, 0.0]},
+              "query": {"len": 4, "l2": 2.1, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.1, 0.0, 1.0]},
+              "key": {"len": 2, "l2": 1.1, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.1]},
+              "value": {"len": 2, "l2": 3.1, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.1]},
+              "attention": {"len": 4, "l2": 4.1, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.1, 3.0, 0.0]},
+              "projected": {"len": 4, "l2": 5.1, "mean_abs": 2.25, "max_abs": 6.0, "first8": [3.0, 6.0, 0.1, 0.0]},
+              "hidden": {"len": 4, "l2": 6.1, "mean_abs": 2.5, "max_abs": 6.0, "first8": [4.0, 6.0, 0.1, 0.0]}
+            }
+          ]
         }"#
     }
 }
