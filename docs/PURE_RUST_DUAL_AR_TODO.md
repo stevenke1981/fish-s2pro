@@ -136,8 +136,14 @@
 - [x] C++ post-module transformer parity hook
   - Add an s2.cpp dump for `build_transformer(quantizer.post_module)` before upsample so Rust post-module math can be pinned independently.
   - Acceptance: `scripts/dump_post_module_parity.ps1` builds `s2_post_module_dump`, compares s2.cpp `build_transformer(quantizer.post_module)` vs Rust `forward_codec_post_module(...)`, and passes on greedy `hi` (`hidden_l2_delta=0.00007342`, `hidden_first8_mae=0.00003685`).
-- [ ] `fish_s2_infer::codec::rvq_decode_latents(latents) -> acoustic_features`
+- [x] `fish_s2_infer::codec::forward_codec_upsample(post_hidden) -> CodecUpsampleResult`
   - Port quantizer upsample ConvTranspose + ConvNeXt stages after post-module parity is pinned.
+  - Acceptance: typed F16 registry binds `quantizer.upsample.{0,1}` weights; ignored local GGUF smoke runs RVQ lookup -> post-module -> 2-stage upsample on greedy `hi`; `fish_s2_decode_stage_dump` writes finite stats to `output/decode_stage_hi_rust.json` (`2 -> 8 frames x 1024 hidden`).
+- [ ] C++ quantizer decode-stage parity hook
+  - Compare s2.cpp `build_quantizer_decode_stage(...)` against Rust RVQ lookup -> post-module -> upsample before expanding decoder waveform path.
+  - Acceptance: script builds a C++ helper and compares `output/decode_stage_hi_cpp.json` vs `output/decode_stage_hi_rust.json` within documented tolerance.
+- [ ] `fish_s2_infer::codec::rvq_decode_latents(latents) -> acoustic_features`
+  - Wrap post-module + upsample into the public codec decode-stage API after C++ parity is pinned.
   - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook.
 - [ ] `fish_s2_infer::codec::decode_waveform(codes) -> Pcm/Wav`
   - Port post-module transformer/ConvNeXt/upsample path.
@@ -350,4 +356,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-04 — Codec/RVQ: C++ post-module transformer parity passes; next: quantizer upsample ConvTranspose + ConvNeXt*
+*Last updated: 2026-06-04 — Codec/RVQ: Rust quantizer upsample ConvTranspose + ConvNeXt smoke passes; next: C++ quantizer decode-stage parity hook*

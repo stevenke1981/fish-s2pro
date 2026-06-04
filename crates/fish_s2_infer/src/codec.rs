@@ -28,6 +28,11 @@ pub const CODEC_RVQ_LOCAL_HEADS: usize = 16;
 pub const CODEC_RVQ_ROPE_BASE: f32 = 10_000.0;
 pub const CODEC_RVQ_NORM_EPS: f32 = 1e-5;
 pub const CODEC_RVQ_WINDOW_SIZE: usize = 128;
+pub const CODEC_UPSAMPLE_STAGES: usize = 2;
+pub const CODEC_UPSAMPLE_FACTOR: usize = 2;
+pub const CODEC_CONVNEXT_KERNEL_SIZE: usize = 7;
+pub const CODEC_CONVNEXT_EXPANDED_SIZE: usize = 4096;
+pub const CODEC_CONVNEXT_NORM_EPS: f32 = 1e-6;
 
 #[derive(Debug, Clone)]
 pub struct CodecTensorRegistry {
@@ -41,6 +46,7 @@ pub struct CodecTensorRegistry {
     residual_quantizers: Vec<CodecQuantizerWeights>,
     pre_module_layers: Vec<CodecTransformerLayerWeights>,
     post_module_layers: Vec<CodecTransformerLayerWeights>,
+    quantizer_upsample: CodecUpsampleWeights,
 }
 
 impl CodecTensorRegistry {
@@ -76,6 +82,7 @@ impl CodecTensorRegistry {
         let post_module_layers = (0..CODEC_TRANSFORMER_LAYERS)
             .map(|layer| CodecTransformerLayerWeights::new("quantizer.post_module", layer))
             .collect::<Vec<_>>();
+        let quantizer_upsample = CodecUpsampleWeights::new();
 
         let registry = Self {
             architecture,
@@ -88,6 +95,7 @@ impl CodecTensorRegistry {
             residual_quantizers,
             pre_module_layers,
             post_module_layers,
+            quantizer_upsample,
         };
         registry.validate()?;
         Ok(registry)
@@ -121,6 +129,10 @@ impl CodecTensorRegistry {
 
     pub fn post_module_layers(&self) -> &[CodecTransformerLayerWeights] {
         &self.post_module_layers
+    }
+
+    pub fn quantizer_upsample(&self) -> &CodecUpsampleWeights {
+        &self.quantizer_upsample
     }
 
     pub fn dump_rows(&self, tensor_data_start: u64) -> Result<Vec<CodecTensorDumpRow>> {
@@ -184,6 +196,7 @@ impl CodecTensorRegistry {
             &self.post_module_layers,
             &mut failures,
         );
+        validate_upsample(&self.tensors, &self.quantizer_upsample, &mut failures);
 
         if self.residual_layer_set() != (0..CODEC_RESIDUAL_QUANTIZERS).collect::<BTreeSet<_>>() {
             failures.push(format!(
@@ -283,6 +296,63 @@ impl CodecTransformerLayerWeights {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecUpsampleWeights {
+    pub stages: Vec<CodecUpsampleStageWeights>,
+}
+
+impl CodecUpsampleWeights {
+    pub fn new() -> Self {
+        Self {
+            stages: (0..CODEC_UPSAMPLE_STAGES)
+                .map(CodecUpsampleStageWeights::new)
+                .collect(),
+        }
+    }
+}
+
+impl Default for CodecUpsampleWeights {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecUpsampleStageWeights {
+    pub index: usize,
+    pub conv_transpose_weight: String,
+    pub conv_transpose_bias: String,
+    pub convnext_gamma: String,
+    pub dwconv_weight: String,
+    pub dwconv_bias: String,
+    pub norm_weight: String,
+    pub norm_bias: String,
+    pub pwconv1_weight: String,
+    pub pwconv1_bias: String,
+    pub pwconv2_weight: String,
+    pub pwconv2_bias: String,
+}
+
+impl CodecUpsampleStageWeights {
+    pub fn new(index: usize) -> Self {
+        let prefix = format!("quantizer.upsample.{index}");
+        Self {
+            index,
+            conv_transpose_weight: format!("{prefix}.0.conv.weight"),
+            conv_transpose_bias: format!("{prefix}.0.conv.bias"),
+            convnext_gamma: format!("{prefix}.1.gamma"),
+            dwconv_weight: format!("{prefix}.1.dwconv.conv.weight"),
+            dwconv_bias: format!("{prefix}.1.dwconv.conv.bias"),
+            norm_weight: format!("{prefix}.1.norm.weight"),
+            norm_bias: format!("{prefix}.1.norm.bias"),
+            pwconv1_weight: format!("{prefix}.1.pwconv1.weight"),
+            pwconv1_bias: format!("{prefix}.1.pwconv1.bias"),
+            pwconv2_weight: format!("{prefix}.1.pwconv2.weight"),
+            pwconv2_bias: format!("{prefix}.1.pwconv2.bias"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodecPostModuleF16Weights {
     pub layers: Vec<CodecTransformerLayerF16Weights>,
@@ -324,6 +394,146 @@ impl CodecPostModuleF16Weights {
         )?;
         for layer in &self.layers {
             layer.validate_dimensions()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecUpsampleF16Weights {
+    pub stages: Vec<CodecUpsampleStageF16Weights>,
+}
+
+impl CodecUpsampleF16Weights {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        let registry = CodecTensorRegistry::from_gguf(gguf)?;
+        Self::from_gguf_registry(gguf, &registry)
+    }
+
+    pub fn from_gguf_registry(gguf: &GgufFile, registry: &CodecTensorRegistry) -> Result<Self> {
+        let weights = Self {
+            stages: registry
+                .quantizer_upsample()
+                .stages
+                .iter()
+                .map(|stage| CodecUpsampleStageF16Weights::from_names(gguf, stage))
+                .collect::<Result<Vec<_>>>()?,
+        };
+        weights.validate_dimensions()?;
+        Ok(weights)
+    }
+
+    fn validate_dimensions(&self) -> Result<()> {
+        if self.stages.len() != CODEC_UPSAMPLE_STAGES {
+            return Err(InferError::Message(format!(
+                "codec upsample stage count mismatch: expected {}, got {}",
+                CODEC_UPSAMPLE_STAGES,
+                self.stages.len()
+            )));
+        }
+        for stage in &self.stages {
+            stage.validate_dimensions()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecUpsampleStageF16Weights {
+    pub index: usize,
+    pub conv_transpose_weight: F16TensorView,
+    pub conv_transpose_bias: F16TensorView,
+    pub convnext_gamma: F16TensorView,
+    pub dwconv_weight: F16TensorView,
+    pub dwconv_bias: F16TensorView,
+    pub norm_weight: F16TensorView,
+    pub norm_bias: F16TensorView,
+    pub pwconv1_weight: F16TensorView,
+    pub pwconv1_bias: F16TensorView,
+    pub pwconv2_weight: F16TensorView,
+    pub pwconv2_bias: F16TensorView,
+}
+
+impl CodecUpsampleStageF16Weights {
+    fn from_names(gguf: &GgufFile, names: &CodecUpsampleStageWeights) -> Result<Self> {
+        Ok(Self {
+            index: names.index,
+            conv_transpose_weight: F16TensorView::from_gguf(gguf, &names.conv_transpose_weight)?,
+            conv_transpose_bias: F16TensorView::from_gguf(gguf, &names.conv_transpose_bias)?,
+            convnext_gamma: F16TensorView::from_gguf(gguf, &names.convnext_gamma)?,
+            dwconv_weight: F16TensorView::from_gguf(gguf, &names.dwconv_weight)?,
+            dwconv_bias: F16TensorView::from_gguf(gguf, &names.dwconv_bias)?,
+            norm_weight: F16TensorView::from_gguf(gguf, &names.norm_weight)?,
+            norm_bias: F16TensorView::from_gguf(gguf, &names.norm_bias)?,
+            pwconv1_weight: F16TensorView::from_gguf(gguf, &names.pwconv1_weight)?,
+            pwconv1_bias: F16TensorView::from_gguf(gguf, &names.pwconv1_bias)?,
+            pwconv2_weight: F16TensorView::from_gguf(gguf, &names.pwconv2_weight)?,
+            pwconv2_bias: F16TensorView::from_gguf(gguf, &names.pwconv2_bias)?,
+        })
+    }
+
+    fn validate_dimensions(&self) -> Result<()> {
+        let hidden = CODEC_HIDDEN_SIZE as usize;
+        let expanded = CODEC_CONVNEXT_EXPANDED_SIZE;
+        let specs = [
+            (
+                self.conv_transpose_weight.name(),
+                self.conv_transpose_weight.dimensions(),
+                vec![CODEC_UPSAMPLE_FACTOR, hidden, hidden],
+            ),
+            (
+                self.conv_transpose_bias.name(),
+                self.conv_transpose_bias.dimensions(),
+                vec![hidden],
+            ),
+            (
+                self.convnext_gamma.name(),
+                self.convnext_gamma.dimensions(),
+                vec![hidden],
+            ),
+            (
+                self.dwconv_weight.name(),
+                self.dwconv_weight.dimensions(),
+                vec![CODEC_CONVNEXT_KERNEL_SIZE, 1, hidden],
+            ),
+            (
+                self.dwconv_bias.name(),
+                self.dwconv_bias.dimensions(),
+                vec![hidden],
+            ),
+            (
+                self.norm_weight.name(),
+                self.norm_weight.dimensions(),
+                vec![hidden],
+            ),
+            (
+                self.norm_bias.name(),
+                self.norm_bias.dimensions(),
+                vec![hidden],
+            ),
+            (
+                self.pwconv1_weight.name(),
+                self.pwconv1_weight.dimensions(),
+                vec![hidden, expanded],
+            ),
+            (
+                self.pwconv1_bias.name(),
+                self.pwconv1_bias.dimensions(),
+                vec![expanded],
+            ),
+            (
+                self.pwconv2_weight.name(),
+                self.pwconv2_weight.dimensions(),
+                vec![expanded, hidden],
+            ),
+            (
+                self.pwconv2_bias.name(),
+                self.pwconv2_bias.dimensions(),
+                vec![hidden],
+            ),
+        ];
+        for (name, actual, expected) in specs {
+            validate_f16_dims(name, actual, &expected)?;
         }
         Ok(())
     }
@@ -426,6 +636,14 @@ pub struct CodecPostModuleResult {
     pub hidden: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecUpsampleResult {
+    pub input_frames: u32,
+    pub output_frames: u32,
+    pub hidden_dim: usize,
+    pub hidden: Vec<f32>,
+}
+
 pub fn forward_codec_post_module(
     latents: &[f32],
     n_frames: u32,
@@ -457,6 +675,32 @@ pub fn forward_codec_post_module(
         n_frames,
         hidden_dim,
         hidden: tokens.into_iter().flatten().collect(),
+    })
+}
+
+pub fn forward_codec_upsample(
+    hidden: &[f32],
+    n_frames: u32,
+    weights: &CodecUpsampleF16Weights,
+) -> Result<CodecUpsampleResult> {
+    let mut frames = usize::try_from(n_frames)
+        .map_err(|_| InferError::Message("n_frames overflows usize".into()))?;
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    validate_frame_major_len("codec upsample input", hidden, frames, hidden_dim)?;
+    let mut current = hidden.to_vec();
+    for stage in &weights.stages {
+        current = forward_codec_upsample_stage(&current, frames, stage)?;
+        frames = frames
+            .checked_mul(CODEC_UPSAMPLE_FACTOR)
+            .ok_or_else(|| InferError::Message("codec upsample frame count overflow".into()))?;
+    }
+    let output_frames = u32::try_from(frames)
+        .map_err(|_| InferError::Message("codec upsample output_frames overflows u32".into()))?;
+    Ok(CodecUpsampleResult {
+        input_frames: n_frames,
+        output_frames,
+        hidden_dim,
+        hidden: current,
     })
 }
 
@@ -891,6 +1135,57 @@ fn validate_module(
     }
 }
 
+fn validate_upsample(
+    tensors: &BTreeMap<String, GgufTensorInfo>,
+    weights: &CodecUpsampleWeights,
+    failures: &mut Vec<String>,
+) {
+    if weights.stages.len() != CODEC_UPSAMPLE_STAGES {
+        failures.push(format!(
+            "quantizer upsample stage count: expected {}, got {}",
+            CODEC_UPSAMPLE_STAGES,
+            weights.stages.len()
+        ));
+    }
+    for stage in &weights.stages {
+        let specs = [
+            (
+                &stage.conv_transpose_weight,
+                vec![
+                    CODEC_UPSAMPLE_FACTOR as u64,
+                    CODEC_HIDDEN_SIZE,
+                    CODEC_HIDDEN_SIZE,
+                ],
+            ),
+            (&stage.conv_transpose_bias, vec![CODEC_HIDDEN_SIZE]),
+            (&stage.convnext_gamma, vec![CODEC_HIDDEN_SIZE]),
+            (
+                &stage.dwconv_weight,
+                vec![CODEC_CONVNEXT_KERNEL_SIZE as u64, 1, CODEC_HIDDEN_SIZE],
+            ),
+            (&stage.dwconv_bias, vec![CODEC_HIDDEN_SIZE]),
+            (&stage.norm_weight, vec![CODEC_HIDDEN_SIZE]),
+            (&stage.norm_bias, vec![CODEC_HIDDEN_SIZE]),
+            (
+                &stage.pwconv1_weight,
+                vec![CODEC_HIDDEN_SIZE, CODEC_CONVNEXT_EXPANDED_SIZE as u64],
+            ),
+            (
+                &stage.pwconv1_bias,
+                vec![CODEC_CONVNEXT_EXPANDED_SIZE as u64],
+            ),
+            (
+                &stage.pwconv2_weight,
+                vec![CODEC_CONVNEXT_EXPANDED_SIZE as u64, CODEC_HIDDEN_SIZE],
+            ),
+            (&stage.pwconv2_bias, vec![CODEC_HIDDEN_SIZE]),
+        ];
+        for (name, dimensions) in specs {
+            validate_tensor(tensors, name, &dimensions, failures);
+        }
+    }
+}
+
 fn validate_tensor(
     tensors: &BTreeMap<String, GgufTensorInfo>,
     name: &str,
@@ -1031,6 +1326,298 @@ fn forward_codec_transformer_layer(
     Ok(outputs)
 }
 
+fn forward_codec_upsample_stage(
+    input: &[f32],
+    frames: usize,
+    weights: &CodecUpsampleStageF16Weights,
+) -> Result<Vec<f32>> {
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    validate_frame_major_len("codec upsample stage input", input, frames, hidden_dim)?;
+    let conv = causal_conv_transpose_1d(
+        input,
+        frames,
+        hidden_dim,
+        hidden_dim,
+        CODEC_UPSAMPLE_FACTOR,
+        weights.conv_transpose_weight.values(),
+        weights.conv_transpose_bias.values(),
+    )?;
+    forward_codec_convnext_block(&conv, frames * CODEC_UPSAMPLE_FACTOR, weights)
+}
+
+fn forward_codec_convnext_block(
+    input: &[f32],
+    frames: usize,
+    weights: &CodecUpsampleStageF16Weights,
+) -> Result<Vec<f32>> {
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    validate_frame_major_len("codec convnext input", input, frames, hidden_dim)?;
+    let mut x = depthwise_causal_conv1d(
+        input,
+        frames,
+        hidden_dim,
+        CODEC_CONVNEXT_KERNEL_SIZE,
+        weights.dwconv_weight.values(),
+        weights.dwconv_bias.values(),
+    )?;
+    layer_norm_affine_frame_major(
+        &mut x,
+        frames,
+        hidden_dim,
+        weights.norm_weight.values(),
+        weights.norm_bias.values(),
+        CODEC_CONVNEXT_NORM_EPS,
+    )?;
+    x = linear_bias_frame_major(
+        &x,
+        frames,
+        hidden_dim,
+        CODEC_CONVNEXT_EXPANDED_SIZE,
+        weights.pwconv1_weight.values(),
+        weights.pwconv1_bias.values(),
+    )?;
+    for value in &mut x {
+        *value = gelu_erf(*value);
+    }
+    x = linear_bias_frame_major(
+        &x,
+        frames,
+        CODEC_CONVNEXT_EXPANDED_SIZE,
+        hidden_dim,
+        weights.pwconv2_weight.values(),
+        weights.pwconv2_bias.values(),
+    )?;
+    scale_frame_major_channels(&mut x, hidden_dim, weights.convnext_gamma.values())?;
+    add_frame_major_residual(input, &x)
+}
+
+fn causal_conv_transpose_1d(
+    input: &[f32],
+    frames: usize,
+    in_ch: usize,
+    out_ch: usize,
+    stride: usize,
+    weight: &[f32],
+    bias: &[f32],
+) -> Result<Vec<f32>> {
+    validate_frame_major_len("conv_transpose input", input, frames, in_ch)?;
+    let kernel = stride;
+    let expected_weights = kernel
+        .checked_mul(out_ch)
+        .and_then(|value| value.checked_mul(in_ch))
+        .ok_or_else(|| InferError::Message("conv_transpose weight length overflow".into()))?;
+    if weight.len() != expected_weights {
+        return Err(InferError::Message(format!(
+            "conv_transpose weight length mismatch: expected {expected_weights}, got {}",
+            weight.len()
+        )));
+    }
+    if bias.len() != out_ch {
+        return Err(InferError::Message(format!(
+            "conv_transpose bias length mismatch: expected {out_ch}, got {}",
+            bias.len()
+        )));
+    }
+    let output_frames = frames
+        .checked_mul(stride)
+        .ok_or_else(|| InferError::Message("conv_transpose output frame overflow".into()))?;
+    let mut output = vec![0.0f32; output_frames * out_ch];
+    for frame in 0..frames {
+        let input_row = &input[frame * in_ch..(frame + 1) * in_ch];
+        for kernel_index in 0..kernel {
+            let output_row_start = (frame * stride + kernel_index) * out_ch;
+            for output_channel in 0..out_ch {
+                let weight_start = (kernel_index * out_ch + output_channel) * in_ch;
+                let weight_row = &weight[weight_start..weight_start + in_ch];
+                output[output_row_start + output_channel] += dot(input_row, weight_row);
+            }
+        }
+    }
+    add_frame_bias(&mut output, out_ch, bias)?;
+    Ok(output)
+}
+
+fn depthwise_causal_conv1d(
+    input: &[f32],
+    frames: usize,
+    channels: usize,
+    kernel: usize,
+    weight: &[f32],
+    bias: &[f32],
+) -> Result<Vec<f32>> {
+    validate_frame_major_len("depthwise conv input", input, frames, channels)?;
+    let expected_weights = kernel
+        .checked_mul(channels)
+        .ok_or_else(|| InferError::Message("depthwise conv weight length overflow".into()))?;
+    if weight.len() != expected_weights {
+        return Err(InferError::Message(format!(
+            "depthwise conv weight length mismatch: expected {expected_weights}, got {}",
+            weight.len()
+        )));
+    }
+    if bias.len() != channels {
+        return Err(InferError::Message(format!(
+            "depthwise conv bias length mismatch: expected {channels}, got {}",
+            bias.len()
+        )));
+    }
+    let left_padding = kernel - 1;
+    let mut output = vec![0.0f32; frames * channels];
+    for frame in 0..frames {
+        for channel in 0..channels {
+            let mut sum = bias[channel];
+            for kernel_index in 0..kernel {
+                if let Some(source_frame) = (frame + kernel_index).checked_sub(left_padding) {
+                    if source_frame < frames {
+                        let input_index = source_frame * channels + channel;
+                        let weight_index = kernel_index * channels + channel;
+                        sum += input[input_index] * weight[weight_index];
+                    }
+                }
+            }
+            output[frame * channels + channel] = sum;
+        }
+    }
+    Ok(output)
+}
+
+fn layer_norm_affine_frame_major(
+    values: &mut [f32],
+    frames: usize,
+    channels: usize,
+    weight: &[f32],
+    bias: &[f32],
+    eps: f32,
+) -> Result<()> {
+    validate_frame_major_len("layer_norm input", values, frames, channels)?;
+    if weight.len() != channels || bias.len() != channels {
+        return Err(InferError::Message(format!(
+            "layer_norm affine length mismatch: channels={channels} weight={} bias={}",
+            weight.len(),
+            bias.len()
+        )));
+    }
+    for frame in 0..frames {
+        let row = &mut values[frame * channels..(frame + 1) * channels];
+        let mean = row.iter().sum::<f32>() / channels as f32;
+        let variance = row
+            .iter()
+            .map(|value| {
+                let centered = value - mean;
+                centered * centered
+            })
+            .sum::<f32>()
+            / channels as f32;
+        let scale = (variance + eps).sqrt().recip();
+        for channel in 0..channels {
+            row[channel] = (row[channel] - mean) * scale * weight[channel] + bias[channel];
+        }
+    }
+    Ok(())
+}
+
+fn linear_bias_frame_major(
+    input: &[f32],
+    frames: usize,
+    input_dim: usize,
+    output_dim: usize,
+    weight: &[f32],
+    bias: &[f32],
+) -> Result<Vec<f32>> {
+    validate_frame_major_len("linear frame-major input", input, frames, input_dim)?;
+    if bias.len() != output_dim {
+        return Err(InferError::Message(format!(
+            "linear frame-major bias length mismatch: expected {output_dim}, got {}",
+            bias.len()
+        )));
+    }
+    let mut output = Vec::with_capacity(frames * output_dim);
+    for frame in 0..frames {
+        let row = &input[frame * input_dim..(frame + 1) * input_dim];
+        let mut projected = linear(row, weight, input_dim, output_dim)?;
+        add_bias(&mut projected, bias)?;
+        output.extend(projected);
+    }
+    Ok(output)
+}
+
+fn scale_frame_major_channels(values: &mut [f32], channels: usize, scale: &[f32]) -> Result<()> {
+    if scale.len() != channels {
+        return Err(InferError::Message(format!(
+            "frame-major scale length mismatch: channels={channels} scale={}",
+            scale.len()
+        )));
+    }
+    if !values.len().is_multiple_of(channels) {
+        return Err(InferError::Message(format!(
+            "frame-major values length {} is not divisible by channels {channels}",
+            values.len()
+        )));
+    }
+    for row in values.chunks_exact_mut(channels) {
+        for (slot, factor) in row.iter_mut().zip(scale) {
+            *slot *= factor;
+        }
+    }
+    Ok(())
+}
+
+fn add_frame_major_residual(residual: &[f32], delta: &[f32]) -> Result<Vec<f32>> {
+    if residual.len() != delta.len() {
+        return Err(InferError::Message(format!(
+            "frame-major residual length mismatch: residual={} delta={}",
+            residual.len(),
+            delta.len()
+        )));
+    }
+    Ok(residual
+        .iter()
+        .zip(delta)
+        .map(|(residual, delta)| residual + delta)
+        .collect())
+}
+
+fn add_frame_bias(output: &mut [f32], channels: usize, bias: &[f32]) -> Result<()> {
+    if bias.len() != channels {
+        return Err(InferError::Message(format!(
+            "frame bias length mismatch: channels={channels} bias={}",
+            bias.len()
+        )));
+    }
+    for row in output.chunks_exact_mut(channels) {
+        for (slot, value) in row.iter_mut().zip(bias) {
+            *slot += value;
+        }
+    }
+    Ok(())
+}
+
+fn validate_frame_major_len(
+    name: &str,
+    values: &[f32],
+    frames: usize,
+    channels: usize,
+) -> Result<()> {
+    let expected = frames
+        .checked_mul(channels)
+        .ok_or_else(|| InferError::Message(format!("{name} length overflow")))?;
+    if values.len() == expected {
+        Ok(())
+    } else {
+        Err(InferError::Message(format!(
+            "{name} length mismatch: expected {expected}, got {}",
+            values.len()
+        )))
+    }
+}
+
+fn dot(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum()
+}
+
 fn validate_f16_dims(name: &str, actual: &[usize], expected: &[usize]) -> Result<()> {
     if actual == expected {
         Ok(())
@@ -1073,6 +1660,21 @@ fn add_residual(residual: &[f32], delta: &[f32]) -> Result<Vec<f32>> {
 
 fn silu(value: f32) -> f32 {
     value / (1.0 + (-value).exp())
+}
+
+fn gelu_erf(value: f32) -> f32 {
+    0.5 * value * (1.0 + erf_approx(value * std::f32::consts::FRAC_1_SQRT_2))
+}
+
+fn erf_approx(value: f32) -> f32 {
+    let sign = if value < 0.0 { -1.0 } else { 1.0 };
+    let x = value.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let polynomial = (((((1.061_405_4 * t - 1.453_152_1) * t) + 1.421_413_8) * t - 0.284_496_72)
+        * t
+        + 0.254_829_6)
+        * t;
+    sign * (1.0 - polynomial * (-x * x).exp())
 }
 
 fn add_bias(output: &mut [f32], bias: &[f32]) -> Result<()> {
@@ -1195,6 +1797,45 @@ mod tests {
             .expect("post module");
         assert_eq!(result.hidden_dim, CODEC_HIDDEN_SIZE as usize);
         assert_eq!(result.hidden.len(), 2 * CODEC_HIDDEN_SIZE as usize);
+        assert!(result.hidden.iter().all(|value| value.is_finite()));
+        assert!(result.hidden.iter().any(|value| value.abs() > 0.0));
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn loads_upsample_f16_weights_and_runs_decode_stage_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let rvq_weights = CodecF16Weights::from_gguf(&gguf).expect("codec f16 weights");
+        let post_weights =
+            CodecPostModuleF16Weights::from_gguf(&gguf).expect("post module f16 weights");
+        let upsample_weights =
+            CodecUpsampleF16Weights::from_gguf(&gguf).expect("upsample f16 weights");
+        assert_eq!(upsample_weights.stages.len(), CODEC_UPSAMPLE_STAGES);
+        assert_eq!(
+            upsample_weights.stages[0]
+                .conv_transpose_weight
+                .dimensions(),
+            &[
+                CODEC_UPSAMPLE_FACTOR,
+                CODEC_HIDDEN_SIZE as usize,
+                CODEC_HIDDEN_SIZE as usize
+            ]
+        );
+
+        let codes = vec![
+            3988, 29, 487, 925, 184, 865, 526, 924, 37, 12, 189, 460, 854, 549, 947, 935, 339, 39,
+            892, 855,
+        ];
+        let rvq = rvq_lookup_codes(&codes, 10, 2, &rvq_weights).expect("rvq lookup");
+        let post = forward_codec_post_module(&rvq.latents, rvq.n_frames, &post_weights)
+            .expect("post module");
+        let result = forward_codec_upsample(&post.hidden, post.n_frames, &upsample_weights)
+            .expect("upsample");
+        assert_eq!(result.input_frames, 2);
+        assert_eq!(result.output_frames, 8);
+        assert_eq!(result.hidden_dim, CODEC_HIDDEN_SIZE as usize);
+        assert_eq!(result.hidden.len(), 8 * CODEC_HIDDEN_SIZE as usize);
         assert!(result.hidden.iter().all(|value| value.is_finite()));
         assert!(result.hidden.iter().any(|value| value.abs() > 0.0));
     }

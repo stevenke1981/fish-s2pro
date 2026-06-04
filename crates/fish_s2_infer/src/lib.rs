@@ -18,10 +18,12 @@ pub mod server;
 
 pub use attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape, SlowArKvCache};
 pub use codec::{
-    classify_codec_tensor, format_codec_dimensions, forward_codec_post_module, rvq_lookup_codes,
-    CodecF16Weights, CodecPostModuleF16Weights, CodecPostModuleResult, CodecQuantizerF16Weights,
-    CodecQuantizerWeights, CodecRvqLookupResult, CodecTensorDumpRow, CodecTensorRegistry,
-    CodecTensorRoleInfo, CodecTransformerLayerF16Weights, CodecTransformerLayerWeights,
+    classify_codec_tensor, format_codec_dimensions, forward_codec_post_module,
+    forward_codec_upsample, rvq_lookup_codes, CodecF16Weights, CodecPostModuleF16Weights,
+    CodecPostModuleResult, CodecQuantizerF16Weights, CodecQuantizerWeights, CodecRvqLookupResult,
+    CodecTensorDumpRow, CodecTensorRegistry, CodecTensorRoleInfo, CodecTransformerLayerF16Weights,
+    CodecTransformerLayerWeights, CodecUpsampleF16Weights, CodecUpsampleResult,
+    CodecUpsampleStageF16Weights, CodecUpsampleStageWeights, CodecUpsampleWeights,
     CODEC_ARCHITECTURE, CODEC_RESIDUAL_QUANTIZERS, CODEC_TRANSFORMER_LAYERS,
 };
 pub use engine::{EngineConfig, InferenceEngine, SynthesisRequest};
