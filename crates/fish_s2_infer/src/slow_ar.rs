@@ -163,6 +163,25 @@ pub struct SlowArLayerForwardOutput {
 }
 
 impl SlowArLayerSkeleton<'_> {
+    pub fn forward_decode_sequence(
+        &self,
+        hidden_tokens: &[Vec<f32>],
+        cache: &mut SlowArKvCache,
+        layer: usize,
+        start_position: usize,
+    ) -> Result<Vec<SlowArLayerForwardOutput>> {
+        let mut outputs = Vec::with_capacity(hidden_tokens.len());
+        for (offset, hidden) in hidden_tokens.iter().enumerate() {
+            outputs.push(self.forward_decode_token(
+                hidden,
+                cache,
+                layer,
+                start_position + offset,
+            )?);
+        }
+        Ok(outputs)
+    }
+
     pub fn forward_decode_token(
         &self,
         hidden: &[f32],
@@ -393,6 +412,77 @@ mod tests {
         assert_close(&actual.attention, &[3.0, 0.0, 3.0, 0.0]);
         assert_close(&actual.projected, &[3.0, 6.0, 0.0, 0.0]);
         assert_close(&actual.hidden, &[4.0, 6.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn slow_ar_layer_skeleton_runs_multi_token_decode_sequence() {
+        let shape = SlowArLayerShape {
+            hidden_size: 4,
+            head_count: 2,
+            head_count_kv: 1,
+            head_dim: 2,
+            rope_base: 10_000.0,
+            rms_norm_eps: 0.0,
+        };
+        let attention_norm = [0.5, 1.0, 1.0, 1.0];
+        let head_norm = [std::f32::consts::FRAC_1_SQRT_2; 2];
+        let wqkv = output_major_weight(
+            shape.hidden_size,
+            shape.wqkv_out().unwrap(),
+            &[
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.0; 4],
+                vec![0.0; 4],
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.0; 4],
+                vec![3.0, 0.0, 0.0, 0.0],
+                vec![0.0; 4],
+            ],
+        );
+        let output = output_major_weight(
+            shape.q_size().unwrap(),
+            shape.hidden_size,
+            &[
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 2.0, 0.0],
+                vec![0.0; 4],
+                vec![0.0; 4],
+            ],
+        );
+        let layer = SlowArLayerSkeleton {
+            shape,
+            attention_norm_weight: &attention_norm,
+            q_norm_weight: &head_norm,
+            k_norm_weight: &head_norm,
+            wqkv_weight: &wqkv,
+            output_weight: &output,
+        };
+        let spec = KvCacheSpec {
+            ggml_type: GgmlType::F16,
+            head_dim: shape.head_dim as u32,
+            head_count_kv: shape.head_count_kv as u32,
+            block_count: 1,
+        };
+        let mut cache = SlowArKvCache::new(spec, 2).unwrap();
+
+        let outputs = layer
+            .forward_decode_sequence(
+                &[vec![1.0, 0.0, 0.0, 0.0], vec![1.0, 1.0, 0.0, 0.0]],
+                &mut cache,
+                0,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        assert_close(&outputs[0].key, cache.key_token(0, 0).unwrap());
+        assert_close(&outputs[0].value, cache.value_token(0, 0).unwrap());
+        assert_close(&outputs[1].key, cache.key_token(0, 1).unwrap());
+        assert_close(&outputs[1].value, cache.value_token(0, 1).unwrap());
+        assert!(all_finite(&outputs[1].attention));
+        assert!(all_finite(&outputs[1].hidden));
+        assert_ne!(outputs[0].hidden, outputs[1].hidden);
     }
 
     #[test]

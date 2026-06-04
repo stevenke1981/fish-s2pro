@@ -5,6 +5,10 @@ param(
     [int] $Layer = 0,
     [int] $Position = 0,
     [int] $Threads = 4,
+    [switch] $Cuda,
+    [int] $CudaDevice = 0,
+    [string] $CudaArchitectures = "86",
+    [switch] $AllowUnsupportedCudaCompiler,
     [string] $BuildType = "Release",
     [switch] $BuildOnly,
     [switch] $ConfigureOnly
@@ -58,9 +62,44 @@ function Patch-S2CppSource {
     }
 
     $source = Read-Utf8 $sourcePath
+    $source = Add-IncludeOnce $source "#include <cstdlib>"
     $source = Add-IncludeOnce $source "#include <fstream>"
     $source = Add-IncludeOnce $source "#include <iomanip>"
     $source = Add-IncludeOnce $source "#include <sstream>"
+    if (-not $source.Contains("#include `"ggml-cuda.h`"")) {
+        $source = $source.Replace("#include `"../include/s2_model.h`"`r`n", @"
+#include "../include/s2_model.h"
+#ifdef GGML_USE_CUDA
+#include "ggml-cuda.h"
+#endif
+"@)
+    }
+    $source = $source.Replace("#endif#include <iostream>", "#endif`r`n#include <iostream>")
+
+    if (-not $source.Contains("FISH_S2_CUDA_DEVICE")) {
+        $source = $source.Replace(@"
+    if (!backend_) {
+        backend_ = ggml_backend_cpu_init();
+    }
+"@, @"
+#ifdef GGML_USE_CUDA
+    if (!backend_) {
+        if (const char * cuda_device_env = std::getenv("FISH_S2_CUDA_DEVICE")) {
+            const int cuda_device = std::atoi(cuda_device_env);
+            backend_ = ggml_backend_cuda_init(cuda_device);
+            if (backend_) {
+                std::cout << "[Model] CUDA backend initialized on device " << cuda_device << "." << std::endl;
+            } else {
+                std::cerr << "[Model] CUDA init failed for device " << cuda_device << ", falling back to CPU." << std::endl;
+            }
+        }
+    }
+#endif
+    if (!backend_) {
+        backend_ = ggml_backend_cpu_init();
+    }
+"@)
+    }
 
     $source = $source.Replace(@"
     ggml_tensor * projected = mul_mat_checked(ctx0, layer.wo, attn_cur, "mul_mat:dump_wo");
@@ -416,8 +455,20 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
 }
 
 function Write-DumpBuildFiles {
-    param([string] $SourceDir, [string] $BuildSourceDir)
+    param(
+        [string] $SourceDir,
+        [string] $BuildSourceDir,
+        [bool] $UseCuda,
+        [string] $CudaArch,
+        [bool] $AllowUnsupportedCompiler
+    )
     New-Item -ItemType Directory -Force -Path $BuildSourceDir | Out-Null
+    $cudaOption = if ($UseCuda) { "ON" } else { "OFF" }
+    $cudaUnsupportedCompilerLine = if ($AllowUnsupportedCompiler) {
+        '    string(APPEND CMAKE_CUDA_FLAGS " -allow-unsupported-compiler")'
+    } else {
+        ''
+    }
 
     $main = @"
 #include "s2_model.h"
@@ -525,6 +576,11 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+set(GGML_CUDA $cudaOption CACHE BOOL "" FORCE)
+if(GGML_CUDA)
+    set(CMAKE_CUDA_ARCHITECTURES "$CudaArch" CACHE STRING "" FORCE)
+$cudaUnsupportedCompilerLine
+endif()
 
 add_subdirectory("$($SourceDir.Replace('\', '/'))/ggml" ggml-build)
 
@@ -565,8 +621,9 @@ if (-not [System.IO.Path]::IsPathRooted($resolvedOutput)) {
 Patch-S2CppSource $resolvedSource
 
 $dumpSourceDir = Join-Path $root "output\s2cpp_slow_ar_dump"
-$dumpBuildDir = Join-Path $dumpSourceDir "build"
-Write-DumpBuildFiles $resolvedSource $dumpSourceDir
+$dumpBuildDirName = if ($Cuda) { "build-cuda" } else { "build" }
+$dumpBuildDir = Join-Path $dumpSourceDir $dumpBuildDirName
+Write-DumpBuildFiles $resolvedSource $dumpSourceDir $Cuda.IsPresent $CudaArchitectures $AllowUnsupportedCudaCompiler.IsPresent
 
 cmake -S $dumpSourceDir -B $dumpBuildDir -DCMAKE_BUILD_TYPE=$BuildType
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -585,6 +642,12 @@ if (-not $exe) {
         Select-Object -First 1
 }
 if (-not $exe) { throw "built executable not found under $dumpBuildDir" }
+
+if ($Cuda) {
+    $env:FISH_S2_CUDA_DEVICE = "$CudaDevice"
+} else {
+    Remove-Item Env:\FISH_S2_CUDA_DEVICE -ErrorAction SilentlyContinue
+}
 
 & $exe.FullName `
     --transformer $resolvedTransformer `
