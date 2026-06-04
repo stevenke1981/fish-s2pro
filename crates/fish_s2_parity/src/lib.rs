@@ -228,6 +228,10 @@ pub struct FastArFrameParityReport {
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct GeneratedCodesDump {
     pub backend: String,
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+    #[serde(default)]
+    pub prompt_code_cols: Option<i32>,
     pub text: String,
     pub temperature: f32,
     pub top_p: f32,
@@ -334,6 +338,53 @@ pub struct PostModuleParityReport {
     pub first8_mae: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct DecodeStageDump {
+    pub backend: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    pub num_codebooks: u32,
+    pub input_frames: u32,
+    pub output_frames: u32,
+    pub hidden_dim: usize,
+    pub hidden_len: usize,
+    pub hidden_l2: f64,
+    pub hidden_mean_abs: f64,
+    pub hidden_max_abs: f64,
+    pub hidden_first8: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeStageTolerance {
+    pub max_l2_delta: f64,
+    pub max_mean_abs_delta: f64,
+    pub max_max_abs_delta: f64,
+    pub max_first8_mae: f64,
+}
+
+impl Default for DecodeStageTolerance {
+    fn default() -> Self {
+        // Post-module alone is tighter (~7e-5 L2); full decode stage adds two upsample
+        // ConvNeXt stages. Greedy `hi` fixture observed ~2.5e-3 L2 / ~1.5e-3 first8 MAE.
+        Self {
+            max_l2_delta: 5e-3,
+            max_mean_abs_delta: 5e-5,
+            max_max_abs_delta: 3e-3,
+            max_first8_mae: 2e-3,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodeStageParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+    pub l2_delta: f64,
+    pub mean_abs_delta: f64,
+    pub max_abs_delta: f64,
+    pub first8_mae: f64,
+}
+
 pub fn semantic_token_dump_from_file(path: impl AsRef<Path>) -> Result<SemanticTokenDump> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
@@ -406,6 +457,167 @@ pub fn compare_post_module_dump_files(
     Ok(compare_post_module_dumps(&expected, &actual, tolerance))
 }
 
+pub fn decode_stage_dump_from_file(path: impl AsRef<Path>) -> Result<DecodeStageDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_decode_stage_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+    tolerance: DecodeStageTolerance,
+) -> Result<DecodeStageParityReport> {
+    let expected = decode_stage_dump_from_file(expected)?;
+    let actual = decode_stage_dump_from_file(actual)?;
+    Ok(compare_decode_stage_dumps(&expected, &actual, tolerance))
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub struct WaveformDump {
+    pub backend: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    pub num_codebooks: u32,
+    pub input_frames: u32,
+    #[serde(default)]
+    pub latent_frames: u32,
+    pub sample_rate: u32,
+    pub num_samples: usize,
+    pub samples_l2: f64,
+    pub samples_mean_abs: f64,
+    pub samples_max_abs: f64,
+    pub samples_first8: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WaveformTolerance {
+    pub max_l2_delta: f64,
+    pub max_mean_abs_delta: f64,
+    pub max_max_abs_delta: f64,
+    pub max_first8_mae: f64,
+    pub max_num_samples_delta: usize,
+}
+
+impl Default for WaveformTolerance {
+    fn default() -> Self {
+        Self {
+            max_l2_delta: 50.0,
+            max_mean_abs_delta: 0.05,
+            max_max_abs_delta: 0.2,
+            max_first8_mae: 0.15,
+            max_num_samples_delta: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WaveformParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+    pub l2_delta: f64,
+    pub mean_abs_delta: f64,
+    pub max_abs_delta: f64,
+    pub first8_mae: f64,
+}
+
+pub fn waveform_dump_from_file(path: impl AsRef<Path>) -> Result<WaveformDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_waveform_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+    tolerance: WaveformTolerance,
+) -> Result<WaveformParityReport> {
+    let expected = waveform_dump_from_file(expected)?;
+    let actual = waveform_dump_from_file(actual)?;
+    Ok(compare_waveform_dumps(&expected, &actual, tolerance))
+}
+
+pub fn compare_waveform_dumps(
+    expected: &WaveformDump,
+    actual: &WaveformDump,
+    tolerance: WaveformTolerance,
+) -> WaveformParityReport {
+    let mut failures = Vec::new();
+    if expected.text != actual.text {
+        failures.push(format!(
+            "text mismatch: expected {:?}, actual {:?}",
+            expected.text, actual.text
+        ));
+    }
+    let checks = [
+        (
+            "num_codebooks",
+            expected.num_codebooks as usize,
+            actual.num_codebooks as usize,
+        ),
+        (
+            "input_frames",
+            expected.input_frames as usize,
+            actual.input_frames as usize,
+        ),
+        (
+            "sample_rate",
+            expected.sample_rate as usize,
+            actual.sample_rate as usize,
+        ),
+    ];
+    for (name, expected, actual) in checks {
+        if expected != actual {
+            failures.push(format!(
+                "{name} mismatch: expected {expected}, actual {actual}"
+            ));
+        }
+    }
+    let num_samples_delta = expected.num_samples.abs_diff(actual.num_samples);
+    if num_samples_delta > tolerance.max_num_samples_delta {
+        failures.push(format!(
+            "num_samples delta {num_samples_delta} exceeds {}",
+            tolerance.max_num_samples_delta
+        ));
+    }
+
+    let l2_delta = (expected.samples_l2 - actual.samples_l2).abs();
+    let mean_abs_delta = (expected.samples_mean_abs - actual.samples_mean_abs).abs();
+    let max_abs_delta = (expected.samples_max_abs - actual.samples_max_abs).abs();
+    let first8_mae = first8_mae(&expected.samples_first8, &actual.samples_first8);
+    if l2_delta > tolerance.max_l2_delta {
+        failures.push(format!(
+            "samples_l2 delta {l2_delta:.8} exceeds {:.8}",
+            tolerance.max_l2_delta
+        ));
+    }
+    if mean_abs_delta > tolerance.max_mean_abs_delta {
+        failures.push(format!(
+            "samples_mean_abs delta {mean_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_mean_abs_delta
+        ));
+    }
+    if max_abs_delta > tolerance.max_max_abs_delta {
+        failures.push(format!(
+            "samples_max_abs delta {max_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_max_abs_delta
+        ));
+    }
+    if first8_mae > tolerance.max_first8_mae {
+        failures.push(format!(
+            "samples_first8 MAE {first8_mae:.8} exceeds {:.8}",
+            tolerance.max_first8_mae
+        ));
+    }
+
+    WaveformParityReport {
+        passed: failures.is_empty(),
+        failures,
+        l2_delta,
+        mean_abs_delta,
+        max_abs_delta,
+        first8_mae,
+    }
+}
+
 pub fn compare_generated_codes_dumps(
     expected: &GeneratedCodesDump,
     actual: &GeneratedCodesDump,
@@ -415,6 +627,18 @@ pub fn compare_generated_codes_dumps(
         failures.push(format!(
             "text mismatch: expected {:?}, actual {:?}",
             expected.text, actual.text
+        ));
+    }
+    if expected.prompt_text != actual.prompt_text {
+        failures.push(format!(
+            "prompt_text mismatch: expected {:?}, actual {:?}",
+            expected.prompt_text, actual.prompt_text
+        ));
+    }
+    if expected.prompt_code_cols != actual.prompt_code_cols {
+        failures.push(format!(
+            "prompt_code_cols mismatch: expected {:?}, actual {:?}",
+            expected.prompt_code_cols, actual.prompt_code_cols
         ));
     }
     if (expected.temperature - actual.temperature).abs() > 1e-6 {
@@ -658,6 +882,99 @@ pub fn compare_post_module_dumps(
     }
 
     PostModuleParityReport {
+        passed: failures.is_empty(),
+        failures,
+        l2_delta,
+        mean_abs_delta,
+        max_abs_delta,
+        first8_mae,
+    }
+}
+
+pub fn compare_decode_stage_dumps(
+    expected: &DecodeStageDump,
+    actual: &DecodeStageDump,
+    tolerance: DecodeStageTolerance,
+) -> DecodeStageParityReport {
+    let mut failures = Vec::new();
+    if expected.text != actual.text {
+        failures.push(format!(
+            "text mismatch: expected {:?}, actual {:?}",
+            expected.text, actual.text
+        ));
+    }
+    let checks = [
+        (
+            "num_codebooks",
+            expected.num_codebooks as usize,
+            actual.num_codebooks as usize,
+        ),
+        (
+            "input_frames",
+            expected.input_frames as usize,
+            actual.input_frames as usize,
+        ),
+        (
+            "output_frames",
+            expected.output_frames as usize,
+            actual.output_frames as usize,
+        ),
+        ("hidden_dim", expected.hidden_dim, actual.hidden_dim),
+        ("hidden_len", expected.hidden_len, actual.hidden_len),
+    ];
+    for (name, expected, actual) in checks {
+        if expected != actual {
+            failures.push(format!(
+                "{name} mismatch: expected {expected}, actual {actual}"
+            ));
+        }
+    }
+
+    let expected_len = expected.output_frames as usize * expected.hidden_dim;
+    if expected.hidden_len != expected_len {
+        failures.push(format!(
+            "expected hidden_len {} does not match output_frames*hidden_dim {expected_len}",
+            expected.hidden_len
+        ));
+    }
+    let actual_len = actual.output_frames as usize * actual.hidden_dim;
+    if actual.hidden_len != actual_len {
+        failures.push(format!(
+            "actual hidden_len {} does not match output_frames*hidden_dim {actual_len}",
+            actual.hidden_len
+        ));
+    }
+
+    let l2_delta = (expected.hidden_l2 - actual.hidden_l2).abs();
+    let mean_abs_delta = (expected.hidden_mean_abs - actual.hidden_mean_abs).abs();
+    let max_abs_delta = (expected.hidden_max_abs - actual.hidden_max_abs).abs();
+    let first8_mae = first8_mae(&expected.hidden_first8, &actual.hidden_first8);
+    if l2_delta > tolerance.max_l2_delta {
+        failures.push(format!(
+            "hidden_l2 delta {l2_delta:.8} exceeds {:.8}",
+            tolerance.max_l2_delta
+        ));
+    }
+    if mean_abs_delta > tolerance.max_mean_abs_delta {
+        failures.push(format!(
+            "hidden_mean_abs delta {mean_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_mean_abs_delta
+        ));
+    }
+    if max_abs_delta > tolerance.max_max_abs_delta {
+        failures.push(format!(
+            "hidden_max_abs delta {max_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_max_abs_delta
+        ));
+    }
+    if first8_mae > tolerance.max_first8_mae {
+        failures.push(format!(
+            "hidden_first8 MAE {first8_mae:.8} exceeds {:.8}",
+            tolerance.max_first8_mae
+        ));
+    }
+
+    DecodeStageParityReport {
         passed: failures.is_empty(),
         failures,
         l2_delta,
@@ -1386,7 +1703,7 @@ fn decode_samples(wav: &ParsedWav<'_>) -> Result<Vec<f32>> {
 }
 
 fn chunks_exact<'a>(bytes: &'a [u8], width: usize) -> Result<std::slice::ChunksExact<'a, u8>> {
-    if bytes.len() % width != 0 {
+    if !bytes.len().is_multiple_of(width) {
         return Err(ParityError::Message(
             "WAV data is not sample-aligned".into(),
         ));
@@ -1552,6 +1869,8 @@ mod tests {
     fn compare_generated_codes_dumps_exact_match() {
         let dump = GeneratedCodesDump {
             backend: "rust".into(),
+            prompt_text: None,
+            prompt_code_cols: None,
             text: "hi".into(),
             temperature: 0.0,
             top_p: 1.0,
@@ -1644,6 +1963,51 @@ mod tests {
         let mut actual = expected.clone();
         actual.hidden_l2 += 0.01;
         let report = compare_post_module_dumps(&expected, &actual, PostModuleTolerance::default());
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("hidden_l2 delta")));
+    }
+
+    #[test]
+    fn compare_decode_stage_dumps_exact_match() {
+        let dump = DecodeStageDump {
+            backend: "rust".into(),
+            text: Some("hi".into()),
+            num_codebooks: 10,
+            input_frames: 2,
+            output_frames: 8,
+            hidden_dim: 1024,
+            hidden_len: 8192,
+            hidden_l2: 42.0,
+            hidden_mean_abs: 0.2,
+            hidden_max_abs: 6.0,
+            hidden_first8: vec![0.1, -0.2],
+        };
+        let report = compare_decode_stage_dumps(&dump, &dump, DecodeStageTolerance::default());
+        assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_decode_stage_dumps_reports_stat_delta() {
+        let expected = DecodeStageDump {
+            backend: "s2.cpp".into(),
+            text: Some("hi".into()),
+            num_codebooks: 10,
+            input_frames: 2,
+            output_frames: 8,
+            hidden_dim: 1024,
+            hidden_len: 8192,
+            hidden_l2: 42.0,
+            hidden_mean_abs: 0.2,
+            hidden_max_abs: 6.0,
+            hidden_first8: vec![0.0; 8],
+        };
+        let mut actual = expected.clone();
+        actual.hidden_l2 += 0.01;
+        let report =
+            compare_decode_stage_dumps(&expected, &actual, DecodeStageTolerance::default());
         assert!(!report.passed);
         assert!(report
             .failures

@@ -161,7 +161,27 @@ Observed C++ vs Rust post-module parity for the same fixture:
 | `hidden_max_abs_delta` | 0.00004101 |
 | `hidden_first8_mae` | 0.00003685 |
 
+## Quantizer Decode Stage (RVQ → post-module → upsample)
+
+Completed in Rust:
+
+- `rvq_decode_latents(...)` chains `forward_codec_post_module` + `forward_codec_upsample`.
+- `fish_s2_decode_stage_dump` writes `output/decode_stage_hi_rust.json` (`2 -> 8 frames x 1024 hidden`).
+- `scripts/dump_decode_stage_parity.ps1` builds `s2_decode_stage_dump` and compares against Rust via `fish_s2_parity compare-decode-stage`.
+
+Observed C++ vs Rust decode-stage parity for greedy `hi` generated codes (`2 -> 8 frames x 1024`):
+
+| Field | Value |
+|-------|------:|
+| `hidden_l2_delta` | 0.00250405 |
+| `hidden_mean_abs_delta` | 0.00003651 |
+| `hidden_max_abs_delta` | 0.00211334 |
+| `hidden_first8_mae` | 0.00151788 |
+
+Upsample/ConvNeXt weights use ggml `[ne0, ne1, ne2]` indexing (`i0 + i1*ne0 + i2*ne0*ne1`).
+
 ## Next Slice
 
-- Port quantizer upsample ConvTranspose + ConvNeXt and add a matching C++ parity hook.
-- Then port decoder convolution/ConvNeXt path.
+- `decode_waveform(codes)` parity: `scripts/dump_waveform_parity.ps1` (greedy `hi`).
+- Add reference-prompt generated-codes parity fixtures.
+- `encode_reference_audio(wav)` for voice clone.

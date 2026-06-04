@@ -47,7 +47,7 @@
 | Pure-Rust CPU end-to-end WAV | 4-8+ weeks | Slow-AR + Fast-AR + codec decode + integration, likely slow but C++ free. |
 | Pure-Rust performant GPU end-to-end | 8-12+ weeks | Adds quantized kernels and CUDA/Vulkan/WGPU-style backend parity/perf work. |
 
-**Current pure-Rust state:** tokenizer, GGUF tensor reads, Slow-AR F16 layer math (prefill + decode with persistent KV), output-head logits, `fish_s2_infer::sampling`, `prompt::build_prompt`, `embed_slow_ar_time_major`, `SlowArState` (prefill/step/reset; `StepResult.hidden` = post-`norm.weight` like s2.cpp), `generate::{generate_semantic_tokens, generate_codes}`, and `fast_ar::{forward_codebook_prefix, generate_codebooks_for_semantic}` (4-layer causal prefix decode). CPU and CUDA Slow-AR logits/top-k parity pass. Greedy semantic token parity vs s2.cpp CPU passes (`dump_semantic_parity.ps1`). Greedy first-frame Fast-AR codebooks (all 10) pass (`dump_fast_ar_parity.ps1`). Full C++ `s2::generate` codebook-major output matches Rust `fish_s2_codes_dump` for greedy `hi`, 2 frames (`dump_generated_codes_parity.ps1`). **Not yet verified:** codec; E2E WAV.
+**Current pure-Rust state:** tokenizer, GGUF tensor reads, Slow-AR F16 layer math (prefill + decode with persistent KV), output-head logits, `fish_s2_infer::sampling`, `prompt::build_prompt`, `embed_slow_ar_time_major`, `SlowArState` (prefill/step/reset; `StepResult.hidden` = post-`norm.weight` like s2.cpp), `generate::{generate_semantic_tokens, generate_codes}`, and `fast_ar::{forward_codebook_prefix, generate_codebooks_for_semantic}` (4-layer causal prefix decode). CPU and CUDA Slow-AR logits/top-k parity pass. Greedy semantic token parity vs s2.cpp CPU passes (`dump_semantic_parity.ps1`). Greedy first-frame Fast-AR codebooks (all 10) pass (`dump_fast_ar_parity.ps1`). Full C++ `s2::generate` codebook-major output matches Rust `fish_s2_codes_dump` for greedy `hi`, 2 frames (`dump_generated_codes_parity.ps1`). **Codec decoder waveform** parity passes on greedy `hi` (`scripts/dump_waveform_parity.ps1`, `compare-waveform` + WAV envelope). **Not yet verified:** full E2E WAV (Slow-AR + Fast-AR + codec in one Rust path). Quantizer decode stage (RVQ → post-module → upsample) parity passes on greedy `hi`.
 
 ### Package A — Slow-AR Logits and Sampling
 
@@ -139,17 +139,20 @@
 - [x] `fish_s2_infer::codec::forward_codec_upsample(post_hidden) -> CodecUpsampleResult`
   - Port quantizer upsample ConvTranspose + ConvNeXt stages after post-module parity is pinned.
   - Acceptance: typed F16 registry binds `quantizer.upsample.{0,1}` weights; ignored local GGUF smoke runs RVQ lookup -> post-module -> 2-stage upsample on greedy `hi`; `fish_s2_decode_stage_dump` writes finite stats to `output/decode_stage_hi_rust.json` (`2 -> 8 frames x 1024 hidden`).
-- [ ] C++ quantizer decode-stage parity hook
+- [x] C++ quantizer decode-stage parity hook
   - Compare s2.cpp `build_quantizer_decode_stage(...)` against Rust RVQ lookup -> post-module -> upsample before expanding decoder waveform path.
-  - Acceptance: script builds a C++ helper and compares `output/decode_stage_hi_cpp.json` vs `output/decode_stage_hi_rust.json` within documented tolerance.
-- [ ] `fish_s2_infer::codec::rvq_decode_latents(latents) -> acoustic_features`
-  - Wrap post-module + upsample into the public codec decode-stage API after C++ parity is pinned.
-  - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook.
-- [ ] `fish_s2_infer::codec::decode_waveform(codes) -> Pcm/Wav`
-  - Port post-module transformer/ConvNeXt/upsample path.
-  - Acceptance: codec-only WAV envelope/SNR parity on a tiny code fixture.
+  - Acceptance: `scripts/dump_decode_stage_parity.ps1` builds `s2_decode_stage_dump`, compares `output/decode_stage_hi_cpp.json` vs `output/decode_stage_hi_rust.json` via `fish_s2_parity compare-decode-stage`.
+- [x] `fish_s2_infer::codec::rvq_decode_latents(latents) -> acoustic_features`
+  - Wrap post-module + upsample into `CodecDecodeLatentsResult`; `fish_s2_decode_stage_dump` uses the same path.
+  - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook (`dump_decode_stage_parity.ps1`).
+- [x] `fish_s2_infer::codec::decode_waveform(codes) -> Pcm/Wav`
+  - RVQ lookup → `rvq_decode_latents` → pure-Rust decoder (entry conv, 4 upsample blocks, Snake, output conv, tanh).
+  - Acceptance: `scripts/dump_waveform_parity.ps1` + `fish_s2_parity compare-waveform` on greedy `hi` (`samples_l2_delta≈3.2e-4`, WAV `passed=true`). C++ `s2_codec.cpp` `causal_conv_1d` keeps F16 kernels (ggml `im2col` requirement).
 - [ ] `fish_s2_infer::codec::encode_reference_audio(wav) -> prompt_codes`
   - Needed for voice clone/reference conditioning.
+  - [x] Pre-slice: bind/validate `quantizer.downsample.{0,1}` ConvNeXt weights and `quantizer.pre_module` transformer F16 weights for the encode path.
+  - [ ] Port encoder frontend + quantizer downsample + pre-module forward.
+  - [ ] Port VQ nearest-code search for semantic + 9 residual codebooks.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency
@@ -356,4 +359,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-04 — Codec/RVQ: Rust quantizer upsample ConvTranspose + ConvNeXt smoke passes; next: C++ quantizer decode-stage parity hook*
+*Last updated: 2026-06-05 — Codec/RVQ: waveform decode parity and reference generated-codes parity verified; next: Rust reference-audio encoder path*

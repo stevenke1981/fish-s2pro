@@ -1,5 +1,7 @@
 //! Prompt tensor construction aligned with `s2.cpp` `build_prompt()`.
 
+use std::path::Path;
+
 use crate::error::{InferError, Result};
 use crate::registry::DualArGraphSpec;
 use crate::tokenizer::S2Tokenizer;
@@ -10,6 +12,48 @@ pub struct PromptCodes {
     pub num_codebooks: u32,
     pub cols: usize,
     pub data: Vec<u32>,
+}
+
+/// JSON fixture for reference-prompt parity (`cols` = `T_prompt` timesteps).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct PromptCodesFile {
+    pub prompt_text: String,
+    pub num_codebooks: u32,
+    pub cols: usize,
+    pub codes: Vec<u32>,
+}
+
+impl PromptCodesFile {
+    pub fn to_prompt_codes(&self) -> Result<PromptCodes> {
+        let expected = self
+            .cols
+            .checked_mul(self.num_codebooks as usize)
+            .ok_or_else(|| InferError::Message("prompt codes length overflow".into()))?;
+        if self.codes.len() != expected {
+            return Err(InferError::Message(format!(
+                "prompt codes length mismatch: expected {expected} (cols={} * num_codebooks={}), got {}",
+                self.cols,
+                self.num_codebooks,
+                self.codes.len()
+            )));
+        }
+        Ok(PromptCodes {
+            num_codebooks: self.num_codebooks,
+            cols: self.cols,
+            data: self.codes.clone(),
+        })
+    }
+}
+
+pub fn load_prompt_codes_file(path: impl AsRef<Path>) -> Result<PromptCodesFile> {
+    let bytes = std::fs::read(path.as_ref())
+        .map_err(|err| InferError::Message(format!("read prompt codes: {err}")))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|err| InferError::Message(format!("parse prompt codes json: {err}")))
+}
+
+pub fn load_prompt_codes(path: impl AsRef<Path>) -> Result<PromptCodes> {
+    load_prompt_codes_file(path)?.to_prompt_codes()
 }
 
 /// Row-major prompt layout from `build_prompt()`:
@@ -88,31 +132,37 @@ pub fn build_prompt(
 
     if has_reference {
         let codes = prompt_codes.expect("has_reference implies prompt_codes");
-        append_ids(&mut sys_pre, &tokenizer.encode("<|im_start|>system")?.ids);
+        append_ids(
+            &mut sys_pre,
+            &tokenizer.encode_s2cpp("<|im_start|>system")?.ids,
+        );
         append_ids(&mut sys_pre, &newline);
         append_ids(
             &mut sys_pre,
             &tokenizer
-                .encode(
+                .encode_s2cpp(
                     "convert the provided text to speech reference to the following:\n\nText:\n",
                 )?
                 .ids,
         );
-        append_ids(&mut sys_pre, &tokenizer.encode("<|speaker:0|>")?.ids);
-        append_ids(&mut sys_pre, &tokenizer.encode(prompt_text)?.ids);
-        append_ids(&mut sys_pre, &tokenizer.encode("\n\nSpeech:\n")?.ids);
+        append_ids(&mut sys_pre, &tokenizer.encode_s2cpp("<|speaker:0|>")?.ids);
+        append_ids(&mut sys_pre, &tokenizer.encode_s2cpp(prompt_text)?.ids);
+        append_ids(&mut sys_pre, &tokenizer.encode_s2cpp("\n\nSpeech:\n")?.ids);
 
         let t_prompt = codes.cols;
         append_u32(&mut sys_post, im_end_id);
         append_ids(&mut sys_post, &newline);
-        append_ids(&mut sys_post, &tokenizer.encode("<|im_start|>user")?.ids);
+        append_ids(
+            &mut sys_post,
+            &tokenizer.encode_s2cpp("<|im_start|>user")?.ids,
+        );
         append_ids(&mut sys_post, &newline);
-        append_ids(&mut sys_post, &tokenizer.encode(options.text)?.ids);
+        append_ids(&mut sys_post, &tokenizer.encode_s2cpp(options.text)?.ids);
         append_u32(&mut sys_post, im_end_id);
         append_ids(&mut sys_post, &newline);
         append_ids(
             &mut sys_post,
-            &tokenizer.encode("<|im_start|>assistant")?.ids,
+            &tokenizer.encode_s2cpp("<|im_start|>assistant")?.ids,
         );
         append_ids(&mut sys_post, &newline);
         append_u32(&mut sys_post, voice_id);
@@ -142,22 +192,28 @@ pub fn build_prompt(
         });
     }
 
-    append_ids(&mut sys_post, &tokenizer.encode("<|im_start|>system")?.ids);
+    append_ids(
+        &mut sys_post,
+        &tokenizer.encode_s2cpp("<|im_start|>system")?.ids,
+    );
     append_ids(&mut sys_post, &newline);
     append_ids(
         &mut sys_post,
-        &tokenizer.encode("You are a helpful assistant.")?.ids,
+        &tokenizer.encode_s2cpp("You are a helpful assistant.")?.ids,
     );
     append_u32(&mut sys_post, im_end_id);
     append_ids(&mut sys_post, &newline);
-    append_ids(&mut sys_post, &tokenizer.encode("<|im_start|>user")?.ids);
+    append_ids(
+        &mut sys_post,
+        &tokenizer.encode_s2cpp("<|im_start|>user")?.ids,
+    );
     append_ids(&mut sys_post, &newline);
-    append_ids(&mut sys_post, &tokenizer.encode(options.text)?.ids);
+    append_ids(&mut sys_post, &tokenizer.encode_s2cpp(options.text)?.ids);
     append_u32(&mut sys_post, im_end_id);
     append_ids(&mut sys_post, &newline);
     append_ids(
         &mut sys_post,
-        &tokenizer.encode("<|im_start|>assistant")?.ids,
+        &tokenizer.encode_s2cpp("<|im_start|>assistant")?.ids,
     );
     append_ids(&mut sys_post, &newline);
     append_u32(&mut sys_post, voice_id);
@@ -192,6 +248,53 @@ fn append_u32(dst: &mut Vec<u32>, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_codes_file_validates_length() {
+        let file = PromptCodesFile {
+            prompt_text: "ref".into(),
+            num_codebooks: 2,
+            cols: 3,
+            codes: vec![1, 2, 3, 4, 5, 6],
+        };
+        let codes = file.to_prompt_codes().unwrap();
+        assert_eq!(codes.cols, 3);
+        assert_eq!(codes.data.len(), 6);
+    }
+
+    #[test]
+    #[ignore = "requires local models/tokenizer.json and transformer GGUF"]
+    fn reference_prompt_cols_matches_cpp_golden() {
+        use crate::registry::DualArGraphSpec;
+        use crate::tokenizer::S2Tokenizer;
+        use fish_s2_core::gguf::GgufFile;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tokenizer = S2Tokenizer::from_file(root.join("models/tokenizer.json")).unwrap();
+        let gguf = GgufFile::open(root.join("models/s2-pro-f16-transformer-only.gguf")).unwrap();
+        let graph = DualArGraphSpec::from_gguf(&gguf).unwrap();
+        let file = load_prompt_codes_file(
+            root.join("crates/fish_s2_parity/tests/fixtures/reference_prompt_codes.json"),
+        )
+        .unwrap();
+        let codes = file.to_prompt_codes().unwrap();
+        let prompt = build_prompt(
+            &tokenizer,
+            PromptBuildOptions {
+                text: "hi",
+                prompt_text: Some(file.prompt_text.as_str()),
+                prompt_codes: Some(&codes),
+                graph: &graph,
+            },
+        )
+        .unwrap();
+        // s2.cpp reference_generate_codes_dump with the same fixture.
+        assert_eq!(
+            prompt.cols, 61,
+            "prompt_cols must match s2.cpp build_prompt"
+        );
+    }
 
     #[test]
     fn transpose_matches_time_major_layout() {

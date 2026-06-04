@@ -2,13 +2,18 @@ use std::path::PathBuf;
 
 use fish_s2_core::gguf::GgufFile;
 use fish_s2_infer::{
-    build_prompt, default_tokenizer_path, generate_codes, FastArWeights, GenerateParams,
-    PromptBuildOptions, S2Tokenizer, SeededRng, SlowArState, TransformerTensorRegistry,
+    build_prompt, default_tokenizer_path, generate_codes, load_prompt_codes_file, FastArWeights,
+    GenerateParams, PromptBuildOptions, S2Tokenizer, SeededRng, SlowArState,
+    TransformerTensorRegistry,
 };
 
 #[derive(Debug, serde::Serialize)]
 struct GeneratedCodesDump {
     backend: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_code_cols: Option<i32>,
     text: String,
     temperature: f32,
     top_p: f32,
@@ -30,12 +35,27 @@ fn main() -> fish_s2_infer::Result<()> {
         .map_err(|err| fish_s2_infer::InferError::Message(err.to_string()))?;
     let registry = TransformerTensorRegistry::from_gguf(&gguf)?;
     let fast_weights = FastArWeights::from_gguf(&gguf, &registry)?;
+    let (prompt_text, prompt_codes) = if let Some(path) = &args.prompt_codes {
+        let file = load_prompt_codes_file(path)?;
+        let ref_text = args
+            .prompt_text
+            .as_deref()
+            .unwrap_or(file.prompt_text.as_str());
+        (Some(ref_text.to_string()), Some(file.to_prompt_codes()?))
+    } else {
+        if args.prompt_text.is_some() {
+            return Err(fish_s2_infer::InferError::Message(
+                "--prompt-text requires --prompt-codes".into(),
+            ));
+        }
+        (None, None)
+    };
     let prompt = build_prompt(
         &tokenizer,
         PromptBuildOptions {
             text: &args.text,
-            prompt_text: None,
-            prompt_codes: None,
+            prompt_text: prompt_text.as_deref(),
+            prompt_codes: prompt_codes.as_ref(),
             graph: &graph,
         },
     )?;
@@ -58,6 +78,15 @@ fn main() -> fish_s2_infer::Result<()> {
     )?;
     let dump = GeneratedCodesDump {
         backend: "rust",
+        prompt_text,
+        prompt_code_cols: prompt_codes
+            .as_ref()
+            .map(|codes| {
+                i32::try_from(codes.cols).map_err(|_| {
+                    fish_s2_infer::InferError::Message("prompt cols overflows i32".into())
+                })
+            })
+            .transpose()?,
         text: args.text,
         temperature: args.temperature,
         top_p: args.top_p,
@@ -87,6 +116,8 @@ struct Args {
     transformer: PathBuf,
     tokenizer: PathBuf,
     text: String,
+    prompt_text: Option<String>,
+    prompt_codes: Option<PathBuf>,
     output: PathBuf,
     max_new_tokens: u32,
     temperature: f32,
@@ -101,6 +132,8 @@ impl Args {
         let mut transformer = None;
         let mut tokenizer = None;
         let mut text = "hi".to_string();
+        let mut prompt_text = None;
+        let mut prompt_codes = None;
         let mut output = None;
         let mut max_new_tokens = 2u32;
         let mut temperature = 0.0f32;
@@ -118,6 +151,13 @@ impl Args {
                     tokenizer = Some(PathBuf::from(args.next().ok_or_missing("--tokenizer")?));
                 }
                 "--text" => text = args.next().ok_or_missing("--text")?,
+                "--prompt-text" => {
+                    prompt_text = Some(args.next().ok_or_missing("--prompt-text")?);
+                }
+                "--prompt-codes" => {
+                    prompt_codes =
+                        Some(PathBuf::from(args.next().ok_or_missing("--prompt-codes")?));
+                }
                 "--output" => output = Some(PathBuf::from(args.next().ok_or_missing("--output")?)),
                 "--max-new-tokens" => {
                     max_new_tokens = args
@@ -178,6 +218,8 @@ impl Args {
             })?,
             tokenizer: tokenizer.unwrap_or_else(default_tokenizer_path),
             text,
+            prompt_text,
+            prompt_codes,
             output: output
                 .ok_or_else(|| fish_s2_infer::InferError::Message("missing --output".into()))?,
             max_new_tokens,
@@ -211,7 +253,8 @@ fn parse_float_err(err: std::num::ParseFloatError) -> fish_s2_infer::InferError 
 fn print_usage() {
     eprintln!(
         "Usage: fish_s2_codes_dump --transformer <gguf> --output <codes.json> \
-         [--tokenizer tokenizer.json] [--text hi] [--max-new-tokens 2] [--temperature 0] \
-         [--top-p 1] [--top-k 0] [--min-tokens-before-end 0] [--seed 0]"
+         [--tokenizer tokenizer.json] [--text hi] [--prompt-text <ref>] [--prompt-codes <codes.json>] \
+         [--max-new-tokens 2] [--temperature 0] [--top-p 1] [--top-k 0] \
+         [--min-tokens-before-end 0] [--seed 0]"
     );
 }

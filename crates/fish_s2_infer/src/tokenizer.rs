@@ -4,6 +4,10 @@ use tokenizers::Tokenizer;
 
 use crate::error::{InferError, Result};
 use crate::paths::default_tokenizer_path;
+use crate::tokenizer_s2cpp::S2CppBpeTokenizer;
+
+/// Qwen newline token id used by `s2.cpp` (`NEWLINE = { 198 }`).
+pub const S2CPP_NEWLINE_TOKEN_ID: u32 = 198;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenizedText {
@@ -20,6 +24,7 @@ pub struct S2TokenizerConfig {
 
 pub struct S2Tokenizer {
     tokenizer: Tokenizer,
+    cpp_bpe: S2CppBpeTokenizer,
     config: S2TokenizerConfig,
 }
 
@@ -30,14 +35,18 @@ impl S2Tokenizer {
 
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let tokenizer = Tokenizer::from_file(path).map_err(|err| {
+        let bytes = std::fs::read(path)
+            .map_err(|err| InferError::Message(format!("read tokenizer: {err}")))?;
+        let tokenizer = Tokenizer::from_bytes(&bytes).map_err(|err| {
             InferError::Message(format!(
                 "failed to load tokenizer {}: {err}",
                 path.display()
             ))
         })?;
+        let cpp_bpe = S2CppBpeTokenizer::from_json_bytes(&bytes)?;
         let mut instance = Self {
             tokenizer,
+            cpp_bpe,
             config: S2TokenizerConfig {
                 im_start_id: 0,
                 im_end_id: 0,
@@ -45,9 +54,9 @@ impl S2Tokenizer {
             },
         };
         instance.config = S2TokenizerConfig {
-            im_start_id: instance.special_token_id("<|im_start|>")?,
-            im_end_id: instance.special_token_id("<|im_end|>")?,
-            voice_id: instance.special_token_id("<|voice|>")?,
+            im_start_id: instance.cpp_special_token_id("<|im_start|>")?,
+            im_end_id: instance.cpp_special_token_id("<|im_end|>")?,
+            voice_id: instance.cpp_special_token_id("<|voice|>")?,
         };
         Ok(instance)
     }
@@ -57,7 +66,15 @@ impl S2Tokenizer {
     }
 
     pub fn encode_newline(&self) -> Result<Vec<u32>> {
-        Ok(self.encode("\n")?.ids)
+        Ok(vec![S2CPP_NEWLINE_TOKEN_ID])
+    }
+
+    /// Encode with the same BPE path as `s2.cpp` (`build_prompt`, generation dumps).
+    pub fn encode_s2cpp(&self, text: &str) -> Result<TokenizedText> {
+        Ok(TokenizedText {
+            ids: self.cpp_bpe.encode(text),
+            tokens: Vec::new(),
+        })
     }
 
     pub fn encode(&self, text: &str) -> Result<TokenizedText> {
@@ -71,15 +88,10 @@ impl S2Tokenizer {
         })
     }
 
-    fn special_token_id(&self, token: &str) -> Result<u32> {
-        let encoded = self.encode(token)?;
-        match encoded.ids.len() {
-            1 => Ok(encoded.ids[0]),
-            _ => Err(InferError::Message(format!(
-                "expected single token id for {token:?}, got {:?}",
-                encoded.ids
-            ))),
-        }
+    fn cpp_special_token_id(&self, token: &str) -> Result<u32> {
+        self.cpp_bpe
+            .token_to_id(token)
+            .ok_or_else(|| InferError::Message(format!("missing special token id for {token:?}")))
     }
 }
 
