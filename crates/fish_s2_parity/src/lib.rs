@@ -251,6 +251,20 @@ pub struct GeneratedCodesParityReport {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PromptCodesDump {
+    pub prompt_text: String,
+    pub num_codebooks: u32,
+    pub cols: u32,
+    pub codes: Vec<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptCodesParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct RvqLookupDump {
     pub backend: String,
     #[serde(default)]
@@ -470,6 +484,20 @@ pub fn compare_generated_codes_dump_files(
     let expected = generated_codes_dump_from_file(expected)?;
     let actual = generated_codes_dump_from_file(actual)?;
     Ok(compare_generated_codes_dumps(&expected, &actual))
+}
+
+pub fn prompt_codes_dump_from_file(path: impl AsRef<Path>) -> Result<PromptCodesDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_prompt_codes_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+) -> Result<PromptCodesParityReport> {
+    let expected = prompt_codes_dump_from_file(expected)?;
+    let actual = prompt_codes_dump_from_file(actual)?;
+    Ok(compare_prompt_codes_dumps(&expected, &actual))
 }
 
 pub fn rvq_lookup_dump_from_file(path: impl AsRef<Path>) -> Result<RvqLookupDump> {
@@ -770,6 +798,55 @@ pub fn compare_generated_codes_dumps(
         ));
     }
     GeneratedCodesParityReport {
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
+pub fn compare_prompt_codes_dumps(
+    expected: &PromptCodesDump,
+    actual: &PromptCodesDump,
+) -> PromptCodesParityReport {
+    let mut failures = Vec::new();
+    if expected.prompt_text != actual.prompt_text {
+        failures.push(format!(
+            "prompt_text mismatch: expected {:?}, actual {:?}",
+            expected.prompt_text, actual.prompt_text
+        ));
+    }
+    if expected.num_codebooks != actual.num_codebooks {
+        failures.push(format!(
+            "num_codebooks mismatch: expected {}, actual {}",
+            expected.num_codebooks, actual.num_codebooks
+        ));
+    }
+    if expected.cols != actual.cols {
+        failures.push(format!(
+            "cols mismatch: expected {}, actual {}",
+            expected.cols, actual.cols
+        ));
+    }
+    let expected_len = expected.num_codebooks as usize * expected.cols as usize;
+    if expected.codes.len() != expected_len {
+        failures.push(format!(
+            "expected codes length {} does not match num_codebooks*cols {expected_len}",
+            expected.codes.len()
+        ));
+    }
+    let actual_len = actual.num_codebooks as usize * actual.cols as usize;
+    if actual.codes.len() != actual_len {
+        failures.push(format!(
+            "actual codes length {} does not match num_codebooks*cols {actual_len}",
+            actual.codes.len()
+        ));
+    }
+    if expected.codes != actual.codes {
+        failures.push(format!(
+            "codes mismatch: expected {:?}, actual {:?}",
+            expected.codes, actual.codes
+        ));
+    }
+    PromptCodesParityReport {
         passed: failures.is_empty(),
         failures,
     }
@@ -2031,6 +2108,38 @@ mod tests {
         };
         let report = compare_generated_codes_dumps(&dump, &dump);
         assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_prompt_codes_dumps_exact_match() {
+        let dump = PromptCodesDump {
+            prompt_text: "ref".into(),
+            num_codebooks: 2,
+            cols: 2,
+            codes: vec![10, 11, 20, 21],
+        };
+        let report = compare_prompt_codes_dumps(&dump, &dump);
+        assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_prompt_codes_dumps_reports_code_mismatch() {
+        let expected = PromptCodesDump {
+            prompt_text: "ref".into(),
+            num_codebooks: 2,
+            cols: 2,
+            codes: vec![10, 11, 20, 21],
+        };
+        let actual = PromptCodesDump {
+            codes: vec![10, 12, 20, 21],
+            ..expected.clone()
+        };
+        let report = compare_prompt_codes_dumps(&expected, &actual);
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("codes mismatch")));
     }
 
     #[test]

@@ -21,6 +21,14 @@ struct ReferenceCodesDump {
     final_residual_l2: Vec<f32>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct PromptCodesDump {
+    prompt_text: String,
+    num_codebooks: u32,
+    cols: u32,
+    codes: Vec<i32>,
+}
+
 fn main() -> fish_s2_infer::Result<()> {
     let args = Args::parse()?;
     let gguf = GgufFile::open(&args.codec).map_err(|err| InferError::Message(err.to_string()))?;
@@ -29,13 +37,23 @@ fn main() -> fish_s2_infer::Result<()> {
         Some(path) => encode_reference_wav_file(path, &weights)?,
         None => encode_reference_audio(&synthetic_pcm(args.samples), &weights)?,
     };
-    let dump = ReferenceCodesDump::from_result(result);
-    write_json(&args.output, &dump)?;
+    let num_codebooks = result.num_codebooks;
+    let n_frames = result.quantizer_frames;
+    if args.prompt_codes_format {
+        let prompt_text = args.prompt_text.ok_or_else(|| {
+            InferError::Message("--prompt-codes-format requires --prompt-text".into())
+        })?;
+        let dump = PromptCodesDump::from_result(prompt_text, result);
+        write_json(&args.output, &dump)?;
+    } else {
+        let dump = ReferenceCodesDump::from_result(result);
+        write_json(&args.output, &dump)?;
+    }
     println!(
         "wrote {} ({} codebooks x {} frames)",
         args.output.display(),
-        dump.num_codebooks,
-        dump.n_frames
+        num_codebooks,
+        n_frames
     );
     Ok(())
 }
@@ -57,11 +75,24 @@ impl ReferenceCodesDump {
     }
 }
 
+impl PromptCodesDump {
+    fn from_result(prompt_text: String, result: CodecReferenceAudioResult) -> Self {
+        Self {
+            prompt_text,
+            num_codebooks: result.num_codebooks,
+            cols: result.quantizer_frames,
+            codes: result.codes,
+        }
+    }
+}
+
 struct Args {
     codec: PathBuf,
     output: PathBuf,
     wav_input: Option<PathBuf>,
     samples: usize,
+    prompt_text: Option<String>,
+    prompt_codes_format: bool,
 }
 
 impl Args {
@@ -72,6 +103,8 @@ impl Args {
             .join("reference_codes_synthetic_rust.json");
         let mut wav_input = None;
         let mut samples = CODEC_FRAME_LENGTH;
+        let mut prompt_text = None;
+        let mut prompt_codes_format = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -86,6 +119,8 @@ impl Args {
                         InferError::Message(format!("invalid --samples {raw}: {err}"))
                     })?;
                 }
+                "--prompt-text" => prompt_text = Some(args.next().ok_or_missing("--prompt-text")?),
+                "--prompt-codes-format" => prompt_codes_format = true,
                 "--help" | "-h" => {
                     print_usage();
                     std::process::exit(0);
@@ -98,6 +133,8 @@ impl Args {
             output,
             wav_input,
             samples,
+            prompt_text,
+            prompt_codes_format,
         })
     }
 }
@@ -118,7 +155,7 @@ fn synthetic_pcm(samples: usize) -> Vec<f32> {
         .collect()
 }
 
-fn write_json(path: &Path, dump: &ReferenceCodesDump) -> fish_s2_infer::Result<()> {
+fn write_json<T: serde::Serialize>(path: &Path, dump: &T) -> fish_s2_infer::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -132,6 +169,6 @@ fn write_json(path: &Path, dump: &ReferenceCodesDump) -> fish_s2_infer::Result<(
 fn print_usage() {
     eprintln!(
         "Usage: fish_s2_reference_codes_dump [--codec codec.gguf] [--wav-input reference.wav] \
-         [--samples N] [--output reference_codes.json]"
+         [--samples N] [--prompt-text text] [--prompt-codes-format] [--output reference_codes.json]"
     );
 }

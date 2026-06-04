@@ -499,7 +499,7 @@ function Build-S2CppTool {
     return $exe
 }
 
-if (-not $SkipFixtureBuild -and -not (Test-Path -LiteralPath $Fixture)) {
+if (-not $SkipFixtureBuild) {
     if (-not (Test-Path -LiteralPath $Codec)) {
         throw "missing codec gguf for fixture build: $Codec"
     }
@@ -513,15 +513,33 @@ if (-not $SkipFixtureBuild -and -not (Test-Path -LiteralPath $Fixture)) {
     $promptText = (Read-Utf8 $PromptTextFile).Trim()
     $tinyWav = Join-Path $DumpDir "reference_tiny.wav"
     Write-TinyReferenceWav -Path $tinyWav
-    New-Item -ItemType Directory -Force -Path (Split-Path $Fixture -Parent) | Out-Null
+    $cppPromptCodes = Join-Path $outDir "reference_prompt_codes_cpp.json"
+    $rustPromptCodes = Join-Path $outDir "reference_prompt_codes_rust.json"
     & $encodeExe `
         --codec $Codec `
         --wav $tinyWav `
         --prompt-text $promptText `
-        --output $Fixture `
+        --output $cppPromptCodes `
         --threads $Threads
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Host "wrote reference prompt codes fixture: $Fixture"
+    if (-not $BuildOnly) {
+        cargo run -q -p fish_s2_infer --bin fish_s2_reference_codes_dump -- `
+            --codec $Codec `
+            --wav-input $tinyWav `
+            --prompt-text $promptText `
+            --prompt-codes-format `
+            --output $rustPromptCodes
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        cargo run -q -p fish_s2_parity -- compare-prompt-codes $cppPromptCodes $rustPromptCodes
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Write-Host "reference prompt-code parity OK: $cppPromptCodes vs $rustPromptCodes"
+    }
+    if (-not (Test-Path -LiteralPath $Fixture)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $Fixture -Parent) | Out-Null
+        Copy-Item -Force -LiteralPath $cppPromptCodes -Destination $Fixture
+        Write-Host "wrote reference prompt codes fixture: $Fixture"
+    }
 }
 
 if (-not (Test-Path -LiteralPath $Fixture)) {

@@ -162,6 +162,8 @@
   - [x] Assemble Rust reference encode API and dump tool.
     - `encode_reference_audio` / `encode_reference_wav_file` now run encoder frontend -> quantizer encode stage -> VQ nearest codes.
     - `fish_s2_reference_codes_dump` writes codebook-major JSON for synthetic PCM or `--wav-input`.
+  - [x] Add reference prompt-code parity harness.
+    - `fish_s2_reference_codes_dump --prompt-codes-format`, `fish_s2_parity compare-prompt-codes`, and `dump_reference_generated_codes_parity.ps1` now produce/compare Rust vs s2.cpp prompt-code fixtures.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency
@@ -368,4 +370,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: Rust reference audio encode API + code dump tool implemented; next: s2.cpp reference prompt-code parity*
+*Last updated: 2026-06-05 — Codec/RVQ: reference prompt-code parity harness wired; next: run/debug exact s2.cpp prompt-code parity*
