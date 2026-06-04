@@ -1,0 +1,227 @@
+use fish_s2_core::gguf::{GgmlType, GgufFile};
+
+use crate::error::{InferError, Result};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct F16TensorView {
+    name: String,
+    dimensions: Vec<usize>,
+    values: Vec<f32>,
+}
+
+impl F16TensorView {
+    pub fn from_gguf(gguf: &GgufFile, name: &str) -> Result<Self> {
+        let tensor = gguf
+            .tensor(name)
+            .ok_or_else(|| InferError::Message(format!("tensor not found: {name}")))?;
+        if tensor.ggml_type != GgmlType::F16 {
+            return Err(InferError::Message(format!(
+                "expected F16 tensor {name}, got {:?}",
+                tensor.ggml_type
+            )));
+        }
+        let dimensions = tensor
+            .dimensions
+            .iter()
+            .map(|dim| {
+                usize::try_from(*dim).map_err(|_| {
+                    InferError::Message(format!("tensor dimension overflows usize: {name}"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bytes = gguf
+            .tensor_bytes(name)
+            .map_err(|err| InferError::Message(err.to_string()))?;
+        Self::from_f16_le_bytes(name, dimensions, &bytes)
+    }
+
+    pub fn from_f16_le_bytes(
+        name: impl Into<String>,
+        dimensions: impl Into<Vec<usize>>,
+        bytes: &[u8],
+    ) -> Result<Self> {
+        let dimensions = dimensions.into();
+        let element_count = dimensions.iter().try_fold(1usize, |acc, dim| {
+            acc.checked_mul(*dim)
+                .ok_or_else(|| InferError::Message("F16 tensor element count overflow".to_string()))
+        })?;
+        let expected_bytes = element_count
+            .checked_mul(2)
+            .ok_or_else(|| InferError::Message("F16 tensor byte length overflow".to_string()))?;
+        if bytes.len() != expected_bytes {
+            return Err(InferError::Message(format!(
+                "F16 tensor byte length mismatch: expected {expected_bytes}, got {}",
+                bytes.len()
+            )));
+        }
+        let values = bytes
+            .chunks_exact(2)
+            .map(|chunk| f16_bits_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])))
+            .collect();
+        Ok(Self {
+            name: name.into(),
+            dimensions,
+            values,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn dimensions(&self) -> &[usize] {
+        &self.dimensions
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+}
+
+pub fn rms_norm(input: &[f32], weight: &[f32], eps: f32) -> Result<Vec<f32>> {
+    if input.is_empty() {
+        return Err(InferError::Message("rms_norm input is empty".into()));
+    }
+    if input.len() != weight.len() {
+        return Err(InferError::Message(format!(
+            "rms_norm length mismatch: input={}, weight={}",
+            input.len(),
+            weight.len()
+        )));
+    }
+    let mean_square = input.iter().map(|value| value * value).sum::<f32>() / input.len() as f32;
+    let scale = (mean_square + eps).sqrt().recip();
+    Ok(input
+        .iter()
+        .zip(weight)
+        .map(|(value, weight)| value * scale * weight)
+        .collect())
+}
+
+pub fn linear(
+    input: &[f32],
+    weight: &[f32],
+    input_dim: usize,
+    output_dim: usize,
+) -> Result<Vec<f32>> {
+    if input.len() != input_dim {
+        return Err(InferError::Message(format!(
+            "linear input length mismatch: expected {input_dim}, got {}",
+            input.len()
+        )));
+    }
+    let expected_weights = input_dim
+        .checked_mul(output_dim)
+        .ok_or_else(|| InferError::Message("linear weight length overflow".to_string()))?;
+    if weight.len() != expected_weights {
+        return Err(InferError::Message(format!(
+            "linear weight length mismatch: expected {expected_weights}, got {}",
+            weight.len()
+        )));
+    }
+
+    let mut output = vec![0.0f32; output_dim];
+    for input_index in 0..input_dim {
+        let input_value = input[input_index];
+        let row = &weight[input_index * output_dim..(input_index + 1) * output_dim];
+        for output_index in 0..output_dim {
+            output[output_index] += input_value * row[output_index];
+        }
+    }
+    Ok(output)
+}
+
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = (u32::from(bits & 0x8000)) << 16;
+    let exponent = (bits >> 10) & 0x1f;
+    let fraction = bits & 0x03ff;
+    match (exponent, fraction) {
+        (0, 0) => f32::from_bits(sign),
+        (0, _) => {
+            let value = f32::from(fraction) * 2f32.powi(-24);
+            if sign == 0 {
+                value
+            } else {
+                -value
+            }
+        }
+        (0x1f, 0) => f32::from_bits(sign | 0x7f80_0000),
+        (0x1f, _) => f32::from_bits(sign | 0x7f80_0000 | (u32::from(fraction) << 13)),
+        _ => {
+            let exponent = u32::from(exponent) + 112;
+            f32::from_bits(sign | (exponent << 23) | (u32::from(fraction) << 13))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::registry::HIDDEN_SIZE;
+
+    #[test]
+    fn decodes_f16_le_bytes_to_f32_values() {
+        let bytes = f16_bytes(&[0x3c00, 0xc000, 0x3800, 0x4400]);
+        let tensor = F16TensorView::from_f16_le_bytes("toy", [2, 2], &bytes).unwrap();
+        assert_eq!(tensor.name(), "toy");
+        assert_eq!(tensor.dimensions(), &[2, 2]);
+        assert_eq!(tensor.values(), &[1.0, -2.0, 0.5, 4.0]);
+    }
+
+    #[test]
+    fn rms_norm_matches_manual_smoke() {
+        let output = rms_norm(&[1.0, 2.0, 3.0, 4.0], &[1.0, 0.5, 2.0, -1.0], 1e-6).unwrap();
+        let scale = (7.5f32 + 1e-6).sqrt().recip();
+        assert_close(&output, &[scale, scale, 6.0 * scale, -4.0 * scale]);
+    }
+
+    #[test]
+    fn linear_matches_in_out_weight_layout() {
+        let output = linear(&[2.0, -1.0], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3).unwrap();
+        assert_close(&output, &[-2.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro transformer GGUF in models/"]
+    fn loads_local_norm_weight_as_f16_tensor() {
+        let path = local_model_dir().join("s2-pro-f16-transformer-only.gguf");
+        let gguf = GgufFile::open(path).unwrap();
+        let tensor = F16TensorView::from_gguf(&gguf, "norm.weight").unwrap();
+        assert_eq!(tensor.name(), "norm.weight");
+        assert_eq!(tensor.dimensions(), &[HIDDEN_SIZE as usize]);
+        assert_eq!(tensor.values().len(), HIDDEN_SIZE as usize);
+        assert!(tensor.values().iter().all(|value| value.is_finite()));
+    }
+
+    fn f16_bytes(values: &[u16]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    fn local_model_dir() -> std::path::PathBuf {
+        std::env::var("FISH_S2_MODEL_DIR").map_or_else(
+            |_| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .nth(2)
+                    .expect("workspace root")
+                    .join("models")
+            },
+            std::path::PathBuf::from,
+        )
+    }
+}

@@ -2,6 +2,7 @@ mod engine;
 mod error;
 mod paths;
 pub mod registry;
+pub mod tensor;
 pub mod tokenizer;
 mod wav;
 
@@ -15,6 +16,7 @@ pub use registry::{
     ArGraphSpec, DualArGraphSpec, FastArLayerWeights, KvCacheSpec, SlowArLayerWeights, TensorRole,
     TensorSpec, TransformerTensorRegistry,
 };
+pub use tensor::{linear, rms_norm, F16TensorView};
 pub use tokenizer::{bytelevel_encode_utf8, gpt2_byte_to_unicode, S2Tokenizer, TokenizedText};
 pub use wav::pcm_to_wav;
 

@@ -92,6 +92,16 @@ Token/codebook contract:
 - `tie_word_embeddings = true`
 - `fast_project_in = false` for `s2-pro-f16-transformer-only.gguf`
 
+Phase 4.2 prep slice:
+
+- `fish_s2_infer::tensor::F16TensorView` validates GGUF tensor type/shape/byte
+  length and decodes little-endian F16 payloads to `f32`.
+- `fish_s2_infer::tensor::rms_norm` implements scalar RMSNorm over one vector.
+- `fish_s2_infer::tensor::linear` implements scalar linear projection for
+  registry-style `[input_dim, output_dim]` weights.
+- Ignored smoke test loads `norm.weight` from the local transformer GGUF as an
+  F16 typed tensor.
+
 Root tensor specs:
 
 | Tensor | Dimensions |
@@ -134,11 +144,12 @@ Validation:
 ```powershell
 cargo test --workspace
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
+cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo clippy --all-targets -- -D warnings
 ```
 
 Next Phase 4 work:
 
-- Add typed tensor views for F16 weights.
-- Implement a CPU-only single-layer or single-token forward smoke before trying
-  full prefill/decode.
+- Add typed views for quantized weights needed by non-F16 model variants.
+- Implement the first CPU-only single-layer or single-token forward smoke before
+  trying full prefill/decode.
