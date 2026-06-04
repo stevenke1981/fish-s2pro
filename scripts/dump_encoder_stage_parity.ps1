@@ -1,6 +1,7 @@
 param(
     [string] $DumpDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "output\s2cpp_encoder_stage_dump"),
     [string] $Codec = (Join-Path (Split-Path $PSScriptRoot -Parent) "models\s2-pro-f16-codec-only.gguf"),
+    [string] $WavInput = "",
     [int] $Samples = 2048,
     [int] $Threads = 4,
     [string] $BuildType = "Release",
@@ -29,8 +30,11 @@ function Write-EncoderStageDumpMain {
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -43,6 +47,7 @@ namespace {
 struct Args {
     std::string codec;
     std::string output;
+    std::string wav_input;
     int samples = 2048;
     int threads = 4;
 };
@@ -50,7 +55,7 @@ struct Args {
 void print_help() {
     std::cerr
         << "Usage: s2_encoder_stage_dump --codec <codec.gguf> --output <encoder_stage.json> "
-           "[--samples 2048] [--threads 4]\n";
+           "[--samples 2048] [--wav-input reference.wav] [--threads 4]\n";
 }
 
 bool parse_int(const char * label, const std::string & value, int & out) {
@@ -81,6 +86,10 @@ bool parse_args(int argc, char ** argv, Args & args) {
             const char * v = need_value("--output");
             if (!v) return false;
             args.output = v;
+        } else if (arg == "--wav-input") {
+            const char * v = need_value("--wav-input");
+            if (!v) return false;
+            args.wav_input = v;
         } else if (arg == "--samples") {
             const char * v = need_value("--samples");
             if (!v || !parse_int("--samples", v, args.samples)) return false;
@@ -104,6 +113,103 @@ std::vector<float> synthetic_pcm(int samples) {
         audio[static_cast<size_t>(i)] = (static_cast<float>(i % 97) - 48.0f) / 4096.0f;
     }
     return audio;
+}
+
+uint16_t read_u16(const std::vector<uint8_t> & bytes, size_t offset) {
+    if (offset + 2 > bytes.size()) throw std::runtime_error("unexpected EOF reading WAV u16");
+    return static_cast<uint16_t>(bytes[offset] | (bytes[offset + 1] << 8));
+}
+
+uint32_t read_u32(const std::vector<uint8_t> & bytes, size_t offset) {
+    if (offset + 4 > bytes.size()) throw std::runtime_error("unexpected EOF reading WAV u32");
+    return static_cast<uint32_t>(bytes[offset])
+        | (static_cast<uint32_t>(bytes[offset + 1]) << 8)
+        | (static_cast<uint32_t>(bytes[offset + 2]) << 16)
+        | (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+}
+
+std::vector<float> read_wav_mono(const std::string & path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("failed to open WAV: " + path);
+    std::vector<uint8_t> bytes(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+    if (bytes.size() < 12
+        || std::memcmp(bytes.data(), "RIFF", 4) != 0
+        || std::memcmp(bytes.data() + 8, "WAVE", 4) != 0) {
+        throw std::runtime_error("not a RIFF/WAVE file: " + path);
+    }
+
+    bool have_fmt = false;
+    uint16_t audio_format = 0;
+    uint16_t channels = 0;
+    uint32_t sample_rate = 0;
+    uint16_t bits_per_sample = 0;
+    const uint8_t * data = nullptr;
+    size_t data_len = 0;
+    size_t offset = 12;
+    while (offset + 8 <= bytes.size()) {
+        const uint8_t * id = bytes.data() + offset;
+        const uint32_t len = read_u32(bytes, offset + 4);
+        offset += 8;
+        const size_t end = offset + len;
+        if (end > bytes.size()) throw std::runtime_error("WAV chunk extends past file end");
+        if (std::memcmp(id, "fmt ", 4) == 0) {
+            if (len < 16) throw std::runtime_error("WAV fmt chunk too short");
+            audio_format = read_u16(bytes, offset);
+            channels = read_u16(bytes, offset + 2);
+            sample_rate = read_u32(bytes, offset + 4);
+            bits_per_sample = read_u16(bytes, offset + 14);
+            have_fmt = true;
+        } else if (std::memcmp(id, "data", 4) == 0) {
+            data = bytes.data() + offset;
+            data_len = len;
+        }
+        offset = end + (len % 2);
+    }
+    if (!have_fmt) throw std::runtime_error("missing WAV fmt chunk");
+    if (!data) throw std::runtime_error("missing WAV data chunk");
+    if (channels == 0) throw std::runtime_error("WAV has zero channels");
+    if (sample_rate != 44100) throw std::runtime_error("expected 44100 Hz WAV");
+
+    std::vector<float> interleaved;
+    if (audio_format == 1 && bits_per_sample == 16) {
+        if (data_len % 2 != 0) throw std::runtime_error("PCM16 WAV data length is odd");
+        interleaved.reserve(data_len / 2);
+        for (size_t i = 0; i < data_len; i += 2) {
+            const int16_t sample =
+                static_cast<int16_t>(data[i] | (static_cast<uint16_t>(data[i + 1]) << 8));
+            interleaved.push_back(static_cast<float>(sample) / 32768.0f);
+        }
+    } else if (audio_format == 3 && bits_per_sample == 32) {
+        if (data_len % 4 != 0) throw std::runtime_error("float32 WAV data length is invalid");
+        interleaved.reserve(data_len / 4);
+        for (size_t i = 0; i < data_len; i += 4) {
+            uint32_t raw = static_cast<uint32_t>(data[i])
+                | (static_cast<uint32_t>(data[i + 1]) << 8)
+                | (static_cast<uint32_t>(data[i + 2]) << 16)
+                | (static_cast<uint32_t>(data[i + 3]) << 24);
+            float sample = 0.0f;
+            std::memcpy(&sample, &raw, sizeof(sample));
+            interleaved.push_back(std::max(-1.0f, std::min(1.0f, sample)));
+        }
+    } else {
+        throw std::runtime_error("unsupported WAV format: expected PCM16 or float32");
+    }
+
+    if (interleaved.empty()) throw std::runtime_error("WAV contains no samples");
+    if (channels == 1) return interleaved;
+    if (interleaved.size() % channels != 0) {
+        throw std::runtime_error("WAV sample count is not divisible by channel count");
+    }
+    std::vector<float> mono;
+    mono.reserve(interleaved.size() / channels);
+    for (size_t i = 0; i < interleaved.size(); i += channels) {
+        float sum = 0.0f;
+        for (uint16_t ch = 0; ch < channels; ++ch) sum += interleaved[i + ch];
+        mono.push_back(sum / static_cast<float>(channels));
+    }
+    return mono;
 }
 
 double l2(const std::vector<float> & values) {
@@ -145,9 +251,16 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    std::vector<float> audio;
+    try {
+        audio = args.wav_input.empty() ? synthetic_pcm(args.samples) : read_wav_mono(args.wav_input);
+    } catch (const std::exception & e) {
+        std::cerr << "audio input failed: " << e.what() << "\n";
+        return 1;
+    }
+    const int32_t input_samples = static_cast<int32_t>(audio.size());
     const int32_t frame_length = (codec.impl_->frame_length > 0) ? codec.impl_->frame_length : 512;
-    const int32_t padded = ((args.samples + frame_length - 1) / frame_length) * frame_length;
-    std::vector<float> audio = synthetic_pcm(args.samples);
+    const int32_t padded = ((input_samples + frame_length - 1) / frame_length) * frame_length;
     std::vector<float> audio_padded(static_cast<size_t>(padded), 0.0f);
     std::copy(audio.begin(), audio.end(), audio_padded.begin());
 
@@ -269,7 +382,7 @@ int main(int argc, char ** argv) {
 
     json doc;
     doc["backend"] = "s2.cpp";
-    doc["input_samples"] = args.samples;
+    doc["input_samples"] = input_samples;
     doc["padded_samples"] = padded;
     doc["output_frames"] = output_frames;
     doc["hidden_dim"] = hidden_dim;
@@ -289,7 +402,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
     out.write(json_utf8.data(), static_cast<std::streamsize>(json_utf8.size()));
-    std::cout << "wrote " << args.output << " (" << args.samples << " -> " << padded
+    std::cout << "wrote " << args.output << " (" << input_samples << " -> " << padded
               << " samples, " << output_frames << " frames x " << hidden_dim << " hidden)\n";
     return 0;
 }
@@ -373,23 +486,33 @@ if (-not (Test-Path -LiteralPath $cppExe)) {
     throw "s2_encoder_stage_dump not found under $buildDir"
 }
 
-$tag = "synthetic_${Samples}"
+if ([string]::IsNullOrWhiteSpace($WavInput)) {
+    $tag = "synthetic_${Samples}"
+} else {
+    $wavStem = [System.IO.Path]::GetFileNameWithoutExtension($WavInput)
+    $tag = "wav_" + ($wavStem -replace '[^A-Za-z0-9_.-]', '_')
+}
 $cppJson = Join-Path $outDir "encoder_stage_${tag}_cpp.json"
 $rustJson = Join-Path $outDir "encoder_stage_${tag}_rust.json"
 
-& $cppExe `
-    --codec $Codec `
-    --output $cppJson `
-    --samples $Samples `
-    --threads $Threads
+$cppArgs = @("--codec", $Codec, "--output", $cppJson, "--threads", "$Threads")
+if ([string]::IsNullOrWhiteSpace($WavInput)) {
+    $cppArgs += @("--samples", "$Samples")
+} else {
+    $cppArgs += @("--wav-input", $WavInput)
+}
+& $cppExe @cppArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if ($BuildOnly) { exit 0 }
 
-cargo run -q -p fish_s2_infer --bin fish_s2_encoder_stage_dump -- `
-    --codec $Codec `
-    --output $rustJson `
-    --samples $Samples
+$rustArgs = @("--codec", $Codec, "--output", $rustJson)
+if ([string]::IsNullOrWhiteSpace($WavInput)) {
+    $rustArgs += @("--samples", "$Samples")
+} else {
+    $rustArgs += @("--wav-input", $WavInput)
+}
+cargo run -q -p fish_s2_infer --bin fish_s2_encoder_stage_dump -- @rustArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 cargo run -q -p fish_s2_parity -- compare-encoder-stage $cppJson $rustJson
