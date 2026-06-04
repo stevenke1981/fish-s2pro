@@ -1,0 +1,24 @@
+{
+  "name": "query_graph",
+  "description": "Execute a Cypher query against the knowledge graph for complex multi-hop patterns, aggregations, and cross-service analysis.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Cypher query"
+      },
+      "project": {
+        "type": "string"
+      },
+      "max_rows": {
+        "type": "integer",
+        "description": "Optional row limit. Default: unlimited (100k ceiling)"
+      }
+    },
+    "required": [
+      "query",
+      "project"
+    ]
+  }
+}

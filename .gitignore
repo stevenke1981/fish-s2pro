@@ -1,0 +1,22 @@
+/target/
+
+# Local model assets are large and/or license-gated.
+/models/*.gguf
+/models/*.safetensors
+/models/*.pth
+/models/*.bin
+/models/tokenizer.json
+/models/reference.wav
+/models/reference.txt
+
+# Generated outputs and native build artifacts.
+/output/
+/bin/s2.exe
+/bin/s2
+
+# Editor/OS noise.
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini

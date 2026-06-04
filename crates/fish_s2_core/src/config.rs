@@ -1,0 +1,102 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::models::ModelPair;
+use crate::paths::{ensure_project_dirs, models_dir, output_dir, project_root, server_workdir};
+use crate::voice::VoiceProfile;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub models_dir: PathBuf,
+    pub output_dir: PathBuf,
+    pub server_workdir: PathBuf,
+    pub server_port: u16,
+    pub vulkan_device: i32,
+    pub codec_vulkan_device: i32,
+    pub use_rust_engine: bool,
+    pub active_model_pair_id: Option<String>,
+    pub voices: Vec<VoiceProfile>,
+    pub active_voice_id: Option<uuid::Uuid>,
+    pub last_script: String,
+    pub convert_checkpoint_dir: PathBuf,
+    pub convert_script: PathBuf,
+    pub python_exe: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        let _ = ensure_project_dirs();
+        Self {
+            models_dir: models_dir(),
+            output_dir: output_dir(),
+            server_workdir: server_workdir(),
+            server_port: 8081,
+            vulkan_device: 0,
+            codec_vulkan_device: 0,
+            use_rust_engine: true,
+            active_model_pair_id: None,
+            voices: Vec::new(),
+            active_voice_id: None,
+            last_script: "你好，這是使用 Fish Audio S2 Pro 生成的語音。".to_string(),
+            convert_checkpoint_dir: PathBuf::new(),
+            convert_script: PathBuf::new(),
+            python_exe: "python".to_string(),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn config_path() -> PathBuf {
+        project_root().join("config.json")
+    }
+
+    pub fn load() -> Self {
+        let path = Self::config_path();
+        if let Ok(raw) = fs::read_to_string(&path) {
+            if let Ok(mut cfg) = serde_json::from_str::<Self>(&raw) {
+                if cfg.models_dir.as_os_str().is_empty() {
+                    cfg.models_dir = models_dir();
+                }
+                return cfg;
+            }
+        }
+        let cfg = Self::default();
+        let _ = cfg.save();
+        cfg
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let raw = serde_json::to_string_pretty(self)?;
+        fs::write(path, raw)
+    }
+
+    pub fn active_voice(&self) -> Option<&VoiceProfile> {
+        let id = self.active_voice_id?;
+        self.voices.iter().find(|v| v.id == id)
+    }
+
+    pub fn active_model_pair<'a>(&self, pairs: &'a [ModelPair]) -> Option<&'a ModelPair> {
+        let id = self.active_model_pair_id.as_ref()?;
+        pairs.iter().find(|p| &p.id == id)
+    }
+
+    pub fn ensure_dirs(&self) -> std::io::Result<()> {
+        fs::create_dir_all(&self.models_dir)?;
+        fs::create_dir_all(&self.output_dir)?;
+        fs::create_dir_all(&self.server_workdir)?;
+        Ok(())
+    }
+}
+
+pub fn copy_reference_files(workdir: &Path, wav: &Path, text: &str) -> std::io::Result<()> {
+    fs::create_dir_all(workdir)?;
+    fs::copy(wav, workdir.join("reference.wav"))?;
+    fs::write(workdir.join("reference.txt"), text)?;
+    Ok(())
+}

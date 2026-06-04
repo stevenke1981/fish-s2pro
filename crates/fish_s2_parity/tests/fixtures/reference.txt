@@ -1,0 +1,1 @@
+這是一段用於 voice clone parity 測試的參考文字。

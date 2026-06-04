@@ -1,0 +1,9 @@
+[package]
+name = "fish_s2_parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Golden WAV metrics and parity checks for Fish S2 Pro inference"
+
+[dependencies]
+thiserror.workspace = true

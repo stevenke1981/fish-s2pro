@@ -1,0 +1,32 @@
+[package]
+name = "fish_s2_infer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust-native Fish Audio S2 Pro inference (pipeline + GGUF via ggml FFI)"
+
+[[bin]]
+name = "fish_s2_server"
+path = "src/bin/fish_s2_server.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+server = ["dep:axum", "dep:tokio"]
+# Links mach92432/s2.cpp (ggml) when S2_CPP_DIR points to a built tree.
+cpp-engine = []
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+byteorder = "1"
+memmap2 = "0.9"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"], optional = true }
+
+[build-dependencies]
+cc = "1"

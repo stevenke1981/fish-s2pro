@@ -1,0 +1,50 @@
+{
+  "name": "search_code",
+  "description": "Graph-augmented code search. Finds text patterns via grep, then enriches results with the knowledge graph: deduplicates matches into containing functions, ranks by structural importance (definitions first, popular functions next, tests last). Modes: compact (default, signatures only — token efficient), full (with source), files (just file paths). Use path_filter regex to scope results.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string"
+      },
+      "project": {
+        "type": "string"
+      },
+      "file_pattern": {
+        "type": "string",
+        "description": "Glob for grep --include (e.g. *.go)"
+      },
+      "path_filter": {
+        "type": "string",
+        "description": "Regex filter on result file paths (e.g. ^src/ or \\.(go|ts)$)"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "compact",
+          "full",
+          "files"
+        ],
+        "default": "compact",
+        "description": "compact: signatures+metadata (default). full: with source. files: just file list."
+      },
+      "context": {
+        "type": "integer",
+        "description": "Lines of context around each match (like grep -C). Only used in compact mode."
+      },
+      "regex": {
+        "type": "boolean",
+        "default": false
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Max results (default 10)",
+        "default": 10
+      }
+    },
+    "required": [
+      "pattern",
+      "project"
+    ]
+  }
+}

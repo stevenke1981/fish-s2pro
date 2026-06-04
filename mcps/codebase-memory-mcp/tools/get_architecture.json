@@ -1,0 +1,21 @@
+{
+  "name": "get_architecture",
+  "description": "Get high-level architecture overview — packages, services, dependencies, and project structure at a glance.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "project": {
+        "type": "string"
+      },
+      "aspects": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "project"
+    ]
+  }
+}

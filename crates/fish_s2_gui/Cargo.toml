@@ -1,0 +1,30 @@
+[package]
+name = "fish_s2_gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fish Audio S2 Pro desktop GUI (GGUF + voice clone + TTS)"
+
+[[bin]]
+name = "fish-s2pro"
+path = "src/main.rs"
+
+[features]
+default = []
+cpp-engine = ["fish_s2_infer/cpp-engine"]
+
+[dependencies]
+fish_s2_core = { path = "../fish_s2_core" }
+fish_s2_infer = { path = "../fish_s2_infer", features = ["server"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["file", "image"] }
+rfd = "0.15"
+rodio = { version = "0.20", default-features = true, features = ["wav"] }
+uuid.workspace = true
+chrono.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "fish_s2_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fish Audio S2 Pro — GGUF, server, and TTS client core"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+directories.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+byteorder = "1"
+walkdir = "2"
