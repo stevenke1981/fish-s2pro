@@ -61,7 +61,7 @@ fn main() -> fish_s2_infer::Result<()> {
         .map(|index| hidden_fixture(shape.hidden_size, index))
         .collect::<Vec<_>>();
     let mut cache = SlowArKvCache::new(graph.kv_cache, args.position + args.tokens)?;
-    let outputs = weights.skeleton(shape).forward_decode_sequence(
+    let outputs = weights.skeleton(shape).forward_prefill_sequence(
         &hidden_tokens,
         &mut cache,
         args.layer,

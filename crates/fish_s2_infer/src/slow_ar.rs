@@ -162,6 +162,14 @@ pub struct SlowArLayerForwardOutput {
     pub hidden: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct SlowArLayerPreparedToken {
+    normalized: Vec<f32>,
+    query: Vec<f32>,
+    key: Vec<f32>,
+    value: Vec<f32>,
+}
+
 impl SlowArLayerSkeleton<'_> {
     pub fn forward_decode_sequence(
         &self,
@@ -182,6 +190,45 @@ impl SlowArLayerSkeleton<'_> {
         Ok(outputs)
     }
 
+    pub fn forward_prefill_sequence(
+        &self,
+        hidden_tokens: &[Vec<f32>],
+        cache: &mut SlowArKvCache,
+        layer: usize,
+        start_position: usize,
+    ) -> Result<Vec<SlowArLayerForwardOutput>> {
+        let mut prepared = Vec::with_capacity(hidden_tokens.len());
+        for (offset, hidden) in hidden_tokens.iter().enumerate() {
+            prepared.push(
+                self.prepare_decode_token(hidden, position_for_offset(start_position, offset)?)?,
+            );
+        }
+        for (offset, token) in prepared.iter().enumerate() {
+            cache.write_token(
+                layer,
+                position_for_offset(start_position, offset)?,
+                &token.key,
+                &token.value,
+            )?;
+        }
+        let mut outputs = Vec::with_capacity(hidden_tokens.len());
+        for (offset, (hidden, token)) in hidden_tokens.iter().zip(prepared).enumerate() {
+            let visible_token_count = checked_add(
+                position_for_offset(start_position, offset)?,
+                1,
+                "visible_token_count",
+            )?;
+            outputs.push(self.finish_decode_token(
+                hidden,
+                token,
+                cache,
+                layer,
+                visible_token_count,
+            )?);
+        }
+        Ok(outputs)
+    }
+
     pub fn forward_decode_token(
         &self,
         hidden: &[f32],
@@ -189,6 +236,22 @@ impl SlowArLayerSkeleton<'_> {
         layer: usize,
         position: usize,
     ) -> Result<SlowArLayerForwardOutput> {
+        let prepared = self.prepare_decode_token(hidden, position)?;
+        cache.write_token(layer, position, &prepared.key, &prepared.value)?;
+        self.finish_decode_token(
+            hidden,
+            prepared,
+            cache,
+            layer,
+            checked_add(position, 1, "visible_token_count")?,
+        )
+    }
+
+    fn prepare_decode_token(
+        &self,
+        hidden: &[f32],
+        position: usize,
+    ) -> Result<SlowArLayerPreparedToken> {
         self.validate(hidden)?;
 
         let normalized = rms_norm(hidden, self.attention_norm_weight, self.shape.rms_norm_eps)?;
@@ -230,11 +293,26 @@ impl SlowArLayerSkeleton<'_> {
             self.shape.rope_base,
         )?;
 
-        cache.write_token(layer, position, &key, &value)?;
+        Ok(SlowArLayerPreparedToken {
+            normalized,
+            query,
+            key,
+            value,
+        })
+    }
+
+    fn finish_decode_token(
+        &self,
+        hidden: &[f32],
+        prepared: SlowArLayerPreparedToken,
+        cache: &SlowArKvCache,
+        layer: usize,
+        visible_token_count: usize,
+    ) -> Result<SlowArLayerForwardOutput> {
         let attention = cache.decode_attention(
             layer,
-            position + 1,
-            &query,
+            visible_token_count,
+            &prepared.query,
             self.shape.head_count,
             self.shape.attn_scale(),
         )?;
@@ -251,10 +329,10 @@ impl SlowArLayerSkeleton<'_> {
             .collect();
 
         Ok(SlowArLayerForwardOutput {
-            normalized,
-            query,
-            key,
-            value,
+            normalized: prepared.normalized,
+            query: prepared.query,
+            key: prepared.key,
+            value: prepared.value,
             attention,
             projected,
             hidden,
@@ -332,6 +410,15 @@ fn expect_len(name: &str, values: &[f32], expected: usize) -> Result<()> {
 fn checked_mul(a: usize, b: usize, name: &str) -> Result<usize> {
     a.checked_mul(b)
         .ok_or_else(|| InferError::Message(format!("{name} overflow")))
+}
+
+fn checked_add(a: usize, b: usize, name: &str) -> Result<usize> {
+    a.checked_add(b)
+        .ok_or_else(|| InferError::Message(format!("{name} overflow")))
+}
+
+fn position_for_offset(start_position: usize, offset: usize) -> Result<usize> {
+    checked_add(start_position, offset, "position")
 }
 
 fn usize_from_u32(value: u32, name: &str) -> Result<usize> {
@@ -464,22 +551,31 @@ mod tests {
             head_count_kv: shape.head_count_kv as u32,
             block_count: 1,
         };
+        let hidden_tokens = vec![vec![1.0, 0.0, 0.0, 0.0], vec![1.0, 1.0, 0.0, 0.0]];
         let mut cache = SlowArKvCache::new(spec, 2).unwrap();
 
         let outputs = layer
-            .forward_decode_sequence(
-                &[vec![1.0, 0.0, 0.0, 0.0], vec![1.0, 1.0, 0.0, 0.0]],
-                &mut cache,
-                0,
-                0,
-            )
+            .forward_decode_sequence(&hidden_tokens, &mut cache, 0, 0)
+            .unwrap();
+        let mut prefill_cache = SlowArKvCache::new(spec, 2).unwrap();
+        let prefill_outputs = layer
+            .forward_prefill_sequence(&hidden_tokens, &mut prefill_cache, 0, 0)
             .unwrap();
 
         assert_eq!(outputs.len(), 2);
+        assert_eq!(prefill_outputs, outputs);
         assert_close(&outputs[0].key, cache.key_token(0, 0).unwrap());
         assert_close(&outputs[0].value, cache.value_token(0, 0).unwrap());
         assert_close(&outputs[1].key, cache.key_token(0, 1).unwrap());
         assert_close(&outputs[1].value, cache.value_token(0, 1).unwrap());
+        assert_close(
+            prefill_cache.key_token(0, 0).unwrap(),
+            cache.key_token(0, 0).unwrap(),
+        );
+        assert_close(
+            prefill_cache.value_token(0, 1).unwrap(),
+            cache.value_token(0, 1).unwrap(),
+        );
         assert!(all_finite(&outputs[1].attention));
         assert!(all_finite(&outputs[1].hidden));
         assert_ne!(outputs[0].hidden, outputs[1].hidden);

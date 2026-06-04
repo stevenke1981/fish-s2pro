@@ -112,18 +112,20 @@ Phase 4.2 prep slice:
   decode layer through attention RMSNorm, WQKV split, QK norm, RoPE, KV write,
   GQA attention, output projection, and residual add. This is a CPU shape/math
   smoke, not full model-weight prefill/decode yet.
-- `SlowArLayerSkeleton::forward_decode_sequence` runs multiple hidden tokens
-  through the same layer and KV cache, establishing the first Rust-side
-  multi-token causal decode smoke before batched prefill is implemented.
+- `SlowArLayerSkeleton::forward_prefill_sequence` runs multiple hidden tokens
+  through a layer-local prefill-style path: prepare all token Q/K/V, write the
+  full K/V span into cache, then compute causal attention per token over the
+  visible prefix. `forward_decode_sequence` remains the looped decode reference
+  path for equivalence tests.
 - `fish_s2_infer::slow_ar::SlowArLayerF16Weights` binds a registry layer to
   real local GGUF F16 tensors (`attention_norm`, `q_norm`, `k_norm`, `wqkv`,
   `wo`) and feeds them into the single-token skeleton. The ignored fixture loads
   layer 0 and checks shape consistency plus finite outputs.
 - `fish_s2_slow_ar_dump` writes JSON stats for the same layer 0 Rust fixture,
   including len/L2/mean_abs/max_abs/first8 for normalized, Q, K, V, attention,
-  projection, and final hidden state. `--tokens N` emits a `sequence` array with
-  per-token positions while keeping token 0 stats at the top level for backward
-  compatibility.
+  projection, and final hidden state. `--tokens N` uses the prefill-style
+  sequence path and emits a `sequence` array with per-token positions while
+  keeping token 0 stats at the top level for backward compatibility.
 - `scripts\dump_s2cpp_slow_ar_stats.ps1` patches a local ignored s2.cpp clone,
   builds a standalone `s2_slow_ar_dump` helper without the Crow/server target,
   and writes the matching layer-local C++ JSON stats dump. `-Tokens N` mirrors
