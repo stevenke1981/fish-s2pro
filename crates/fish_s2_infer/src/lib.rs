@@ -20,7 +20,8 @@ pub use registry::{
     TensorSpec, TransformerTensorRegistry,
 };
 pub use slow_ar::{
-    SlowArLayerF16Weights, SlowArLayerForwardOutput, SlowArLayerShape, SlowArLayerSkeleton,
+    SlowArLayerBlockOutput, SlowArLayerF16Weights, SlowArLayerFeedForwardOutput,
+    SlowArLayerForwardOutput, SlowArLayerShape, SlowArLayerSkeleton,
 };
 pub use tensor::{linear, rms_norm, F16TensorView};
 pub use tokenizer::{bytelevel_encode_utf8, gpt2_byte_to_unicode, S2Tokenizer, TokenizedText};

@@ -109,18 +109,23 @@ Phase 4.2 prep slice:
 - `fish_s2_infer::attention::gqa_decode_attention` validates the 32h/8kv GQA
   repeat and single-step decode softmax path over cached K/V tokens.
 - `fish_s2_infer::slow_ar::SlowArLayerSkeleton` wires a toy single-token
-  decode layer through attention RMSNorm, WQKV split, QK norm, RoPE, KV write,
-  GQA attention, output projection, and residual add. This is a CPU shape/math
-  smoke, not full model-weight prefill/decode yet.
+  attention path through RMSNorm, WQKV split, QK norm, RoPE, KV write, GQA
+  attention, output projection, and residual add.
 - `SlowArLayerSkeleton::forward_prefill_sequence` runs multiple hidden tokens
   through a layer-local prefill-style path: prepare all token Q/K/V, write the
   full K/V span into cache, then compute causal attention per token over the
   visible prefix. `forward_decode_sequence` remains the looped decode reference
   path for equivalence tests.
+- `SlowArLayerSkeleton::forward_block_prefill_sequence` adds the transformer FFN
+  sublayer on top of the attention output: `ffn_norm -> w1/w3 -> SwiGLU -> w2
+  -> residual`. This is covered by toy block smoke tests and the ignored local
+  GGUF layer 0 finite smoke, but the C++ JSON dump still covers attention stats
+  only.
 - `fish_s2_infer::slow_ar::SlowArLayerF16Weights` binds a registry layer to
   real local GGUF F16 tensors (`attention_norm`, `q_norm`, `k_norm`, `wqkv`,
-  `wo`) and feeds them into the single-token skeleton. The ignored fixture loads
-  layer 0 and checks shape consistency plus finite outputs.
+  `wo`, `ffn_norm`, `w1`, `w2`, `w3`) and feeds them into the layer skeleton.
+  The ignored fixture loads layer 0 and checks shape consistency plus finite
+  attention and FFN outputs.
 - `fish_s2_slow_ar_dump` writes JSON stats for the same layer 0 Rust fixture,
   including len/L2/mean_abs/max_abs/first8 for normalized, Q, K, V, attention,
   projection, and final hidden state. `--tokens N` uses the prefill-style

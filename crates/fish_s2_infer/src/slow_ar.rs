@@ -8,6 +8,7 @@ use crate::tensor::{linear, rms_norm, F16TensorView};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlowArLayerShape {
     pub hidden_size: usize,
+    pub feed_forward_size: usize,
     pub head_count: usize,
     pub head_count_kv: usize,
     pub head_dim: usize,
@@ -19,6 +20,7 @@ impl SlowArLayerShape {
     pub fn from_ar_graph_spec(spec: &ArGraphSpec) -> Result<Self> {
         Ok(Self {
             hidden_size: usize_from_u32(spec.embedding_length, "hidden_size")?,
+            feed_forward_size: usize_from_u32(spec.feed_forward_length, "feed_forward_size")?,
             head_count: usize_from_u32(spec.head_count, "head_count")?,
             head_count_kv: usize_from_u32(spec.head_count_kv, "head_count_kv")?,
             head_dim: usize_from_u32(spec.head_dim, "head_dim")?,
@@ -53,6 +55,11 @@ impl SlowArLayerShape {
         if self.hidden_size == 0 {
             return Err(InferError::Message("hidden_size must be non-zero".into()));
         }
+        if self.feed_forward_size == 0 {
+            return Err(InferError::Message(
+                "feed_forward_size must be non-zero".into(),
+            ));
+        }
         if self.head_count_kv == 0 || !self.head_count.is_multiple_of(self.head_count_kv) {
             return Err(InferError::Message(format!(
                 "invalid GQA split: heads={}, kv_heads={}",
@@ -85,6 +92,10 @@ pub struct SlowArLayerF16Weights {
     pub k_norm: F16TensorView,
     pub wqkv: F16TensorView,
     pub output: F16TensorView,
+    pub ffn_norm: F16TensorView,
+    pub feed_forward_w1: F16TensorView,
+    pub feed_forward_w2: F16TensorView,
+    pub feed_forward_w3: F16TensorView,
 }
 
 impl SlowArLayerF16Weights {
@@ -103,6 +114,10 @@ impl SlowArLayerF16Weights {
             k_norm: F16TensorView::from_gguf(gguf, &names.attention_k_norm)?,
             wqkv: F16TensorView::from_gguf(gguf, &names.attention_wqkv)?,
             output: F16TensorView::from_gguf(gguf, &names.attention_output)?,
+            ffn_norm: F16TensorView::from_gguf(gguf, &names.ffn_norm)?,
+            feed_forward_w1: F16TensorView::from_gguf(gguf, &names.feed_forward_w1)?,
+            feed_forward_w2: F16TensorView::from_gguf(gguf, &names.feed_forward_w2)?,
+            feed_forward_w3: F16TensorView::from_gguf(gguf, &names.feed_forward_w3)?,
         };
         weights.validate_dimensions(shape)?;
         Ok(weights)
@@ -116,6 +131,10 @@ impl SlowArLayerF16Weights {
             k_norm_weight: self.k_norm.values(),
             wqkv_weight: self.wqkv.values(),
             output_weight: self.output.values(),
+            ffn_norm_weight: self.ffn_norm.values(),
+            feed_forward_w1_weight: self.feed_forward_w1.values(),
+            feed_forward_w2_weight: self.feed_forward_w2.values(),
+            feed_forward_w3_weight: self.feed_forward_w3.values(),
         }
     }
 
@@ -137,6 +156,22 @@ impl SlowArLayerF16Weights {
             self.output.dimensions(),
             &[shape.q_size()?, shape.hidden_size],
         )?;
+        expect_dims("ffn_norm", self.ffn_norm.dimensions(), &[shape.hidden_size])?;
+        expect_dims(
+            "feed_forward_w1",
+            self.feed_forward_w1.dimensions(),
+            &[shape.hidden_size, shape.feed_forward_size],
+        )?;
+        expect_dims(
+            "feed_forward_w2",
+            self.feed_forward_w2.dimensions(),
+            &[shape.feed_forward_size, shape.hidden_size],
+        )?;
+        expect_dims(
+            "feed_forward_w3",
+            self.feed_forward_w3.dimensions(),
+            &[shape.hidden_size, shape.feed_forward_size],
+        )?;
         Ok(())
     }
 }
@@ -149,6 +184,10 @@ pub struct SlowArLayerSkeleton<'a> {
     pub k_norm_weight: &'a [f32],
     pub wqkv_weight: &'a [f32],
     pub output_weight: &'a [f32],
+    pub ffn_norm_weight: &'a [f32],
+    pub feed_forward_w1_weight: &'a [f32],
+    pub feed_forward_w2_weight: &'a [f32],
+    pub feed_forward_w3_weight: &'a [f32],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,6 +198,23 @@ pub struct SlowArLayerForwardOutput {
     pub value: Vec<f32>,
     pub attention: Vec<f32>,
     pub projected: Vec<f32>,
+    pub hidden: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowArLayerFeedForwardOutput {
+    pub normalized: Vec<f32>,
+    pub gate: Vec<f32>,
+    pub up: Vec<f32>,
+    pub activated: Vec<f32>,
+    pub projected: Vec<f32>,
+    pub hidden: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowArLayerBlockOutput {
+    pub attention: SlowArLayerForwardOutput,
+    pub feed_forward: SlowArLayerFeedForwardOutput,
     pub hidden: Vec<f32>,
 }
 
@@ -184,7 +240,7 @@ impl SlowArLayerSkeleton<'_> {
                 hidden,
                 cache,
                 layer,
-                start_position + offset,
+                position_for_offset(start_position, offset)?,
             )?);
         }
         Ok(outputs)
@@ -229,6 +285,28 @@ impl SlowArLayerSkeleton<'_> {
         Ok(outputs)
     }
 
+    pub fn forward_block_prefill_sequence(
+        &self,
+        hidden_tokens: &[Vec<f32>],
+        cache: &mut SlowArKvCache,
+        layer: usize,
+        start_position: usize,
+    ) -> Result<Vec<SlowArLayerBlockOutput>> {
+        let attention_outputs =
+            self.forward_prefill_sequence(hidden_tokens, cache, layer, start_position)?;
+        let mut outputs = Vec::with_capacity(attention_outputs.len());
+        for attention in attention_outputs {
+            let feed_forward = self.forward_feed_forward(&attention.hidden)?;
+            let hidden = feed_forward.hidden.clone();
+            outputs.push(SlowArLayerBlockOutput {
+                attention,
+                feed_forward,
+                hidden,
+            });
+        }
+        Ok(outputs)
+    }
+
     pub fn forward_decode_token(
         &self,
         hidden: &[f32],
@@ -245,6 +323,43 @@ impl SlowArLayerSkeleton<'_> {
             layer,
             checked_add(position, 1, "visible_token_count")?,
         )
+    }
+
+    pub fn forward_feed_forward(&self, hidden: &[f32]) -> Result<SlowArLayerFeedForwardOutput> {
+        self.validate(hidden)?;
+        let normalized = rms_norm(hidden, self.ffn_norm_weight, self.shape.rms_norm_eps)?;
+        let gate = linear(
+            &normalized,
+            self.feed_forward_w1_weight,
+            self.shape.hidden_size,
+            self.shape.feed_forward_size,
+        )?;
+        let up = linear(
+            &normalized,
+            self.feed_forward_w3_weight,
+            self.shape.hidden_size,
+            self.shape.feed_forward_size,
+        )?;
+        let activated = swiglu_split(&gate, &up)?;
+        let projected = linear(
+            &activated,
+            self.feed_forward_w2_weight,
+            self.shape.feed_forward_size,
+            self.shape.hidden_size,
+        )?;
+        let hidden = hidden
+            .iter()
+            .zip(&projected)
+            .map(|(residual, projected)| residual + projected)
+            .collect();
+        Ok(SlowArLayerFeedForwardOutput {
+            normalized,
+            gate,
+            up,
+            activated,
+            projected,
+            hidden,
+        })
     }
 
     fn prepare_decode_token(
@@ -367,6 +482,38 @@ impl SlowArLayerSkeleton<'_> {
                 "output_weight",
             )?,
         )?;
+        expect_len(
+            "ffn_norm_weight",
+            self.ffn_norm_weight,
+            self.shape.hidden_size,
+        )?;
+        expect_len(
+            "feed_forward_w1_weight",
+            self.feed_forward_w1_weight,
+            checked_mul(
+                self.shape.hidden_size,
+                self.shape.feed_forward_size,
+                "feed_forward_w1_weight",
+            )?,
+        )?;
+        expect_len(
+            "feed_forward_w2_weight",
+            self.feed_forward_w2_weight,
+            checked_mul(
+                self.shape.feed_forward_size,
+                self.shape.hidden_size,
+                "feed_forward_w2_weight",
+            )?,
+        )?;
+        expect_len(
+            "feed_forward_w3_weight",
+            self.feed_forward_w3_weight,
+            checked_mul(
+                self.shape.hidden_size,
+                self.shape.feed_forward_size,
+                "feed_forward_w3_weight",
+            )?,
+        )?;
         Ok(())
     }
 }
@@ -383,6 +530,25 @@ fn rms_norm_heads(input: &[f32], weight: &[f32], head_dim: usize, eps: f32) -> R
         output.extend(rms_norm(head, weight, eps)?);
     }
     Ok(output)
+}
+
+fn swiglu_split(gate: &[f32], up: &[f32]) -> Result<Vec<f32>> {
+    if gate.len() != up.len() {
+        return Err(InferError::Message(format!(
+            "SwiGLU length mismatch: gate={} up={}",
+            gate.len(),
+            up.len()
+        )));
+    }
+    Ok(gate
+        .iter()
+        .zip(up)
+        .map(|(gate, up)| gate * sigmoid(*gate) * up)
+        .collect())
+}
+
+fn sigmoid(value: f32) -> f32 {
+    1.0 / (1.0 + (-value).exp())
 }
 
 fn expect_dims(name: &str, actual: &[usize], expected: &[usize]) -> Result<()> {
@@ -435,14 +601,7 @@ mod tests {
 
     #[test]
     fn slow_ar_layer_skeleton_runs_single_token_decode_flow() {
-        let shape = SlowArLayerShape {
-            hidden_size: 4,
-            head_count: 2,
-            head_count_kv: 1,
-            head_dim: 2,
-            rope_base: 10_000.0,
-            rms_norm_eps: 0.0,
-        };
+        let shape = toy_shape();
         let hidden = [1.0, 0.0, 0.0, 0.0];
         let attention_norm = [0.5, 1.0, 1.0, 1.0];
         let head_norm = [std::f32::consts::FRAC_1_SQRT_2; 2];
@@ -470,6 +629,10 @@ mod tests {
                 vec![0.0; 4],
             ],
         );
+        let ffn_norm = [1.0; 4];
+        let feed_forward_w1 = vec![0.0; shape.hidden_size * shape.feed_forward_size];
+        let feed_forward_w2 = vec![0.0; shape.feed_forward_size * shape.hidden_size];
+        let feed_forward_w3 = vec![0.0; shape.hidden_size * shape.feed_forward_size];
         let layer = SlowArLayerSkeleton {
             shape,
             attention_norm_weight: &attention_norm,
@@ -477,6 +640,10 @@ mod tests {
             k_norm_weight: &head_norm,
             wqkv_weight: &wqkv,
             output_weight: &output,
+            ffn_norm_weight: &ffn_norm,
+            feed_forward_w1_weight: &feed_forward_w1,
+            feed_forward_w2_weight: &feed_forward_w2,
+            feed_forward_w3_weight: &feed_forward_w3,
         };
         let spec = KvCacheSpec {
             ggml_type: GgmlType::F16,
@@ -503,48 +670,7 @@ mod tests {
 
     #[test]
     fn slow_ar_layer_skeleton_runs_multi_token_decode_sequence() {
-        let shape = SlowArLayerShape {
-            hidden_size: 4,
-            head_count: 2,
-            head_count_kv: 1,
-            head_dim: 2,
-            rope_base: 10_000.0,
-            rms_norm_eps: 0.0,
-        };
-        let attention_norm = [0.5, 1.0, 1.0, 1.0];
-        let head_norm = [std::f32::consts::FRAC_1_SQRT_2; 2];
-        let wqkv = output_major_weight(
-            shape.hidden_size,
-            shape.wqkv_out().unwrap(),
-            &[
-                vec![1.0, 0.0, 0.0, 0.0],
-                vec![0.0; 4],
-                vec![0.0; 4],
-                vec![1.0, 0.0, 0.0, 0.0],
-                vec![1.0, 0.0, 0.0, 0.0],
-                vec![0.0; 4],
-                vec![3.0, 0.0, 0.0, 0.0],
-                vec![0.0; 4],
-            ],
-        );
-        let output = output_major_weight(
-            shape.q_size().unwrap(),
-            shape.hidden_size,
-            &[
-                vec![1.0, 0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 2.0, 0.0],
-                vec![0.0; 4],
-                vec![0.0; 4],
-            ],
-        );
-        let layer = SlowArLayerSkeleton {
-            shape,
-            attention_norm_weight: &attention_norm,
-            q_norm_weight: &head_norm,
-            k_norm_weight: &head_norm,
-            wqkv_weight: &wqkv,
-            output_weight: &output,
-        };
+        let shape = toy_shape();
         let spec = KvCacheSpec {
             ggml_type: GgmlType::F16,
             head_dim: shape.head_dim as u32,
@@ -553,6 +679,8 @@ mod tests {
         };
         let hidden_tokens = vec![vec![1.0, 0.0, 0.0, 0.0], vec![1.0, 1.0, 0.0, 0.0]];
         let mut cache = SlowArKvCache::new(spec, 2).unwrap();
+        let weights = toy_attention_weights(shape);
+        let layer = weights.skeleton(shape);
 
         let outputs = layer
             .forward_decode_sequence(&hidden_tokens, &mut cache, 0, 0)
@@ -582,15 +710,40 @@ mod tests {
     }
 
     #[test]
-    fn slow_ar_layer_skeleton_rejects_bad_weight_shapes() {
-        let shape = SlowArLayerShape {
-            hidden_size: 4,
-            head_count: 2,
-            head_count_kv: 1,
-            head_dim: 2,
-            rope_base: 10_000.0,
-            rms_norm_eps: 0.0,
+    fn slow_ar_layer_skeleton_runs_block_prefill_with_ffn_residual() {
+        let shape = toy_shape();
+        let spec = KvCacheSpec {
+            ggml_type: GgmlType::F16,
+            head_dim: shape.head_dim as u32,
+            head_count_kv: shape.head_count_kv as u32,
+            block_count: 1,
         };
+        let mut cache = SlowArKvCache::new(spec, 1).unwrap();
+        let weights = toy_attention_weights(shape);
+        let layer = weights.skeleton(shape);
+        let outputs = layer
+            .forward_block_prefill_sequence(&[vec![1.0, 0.0, 0.0, 0.0]], &mut cache, 0, 0)
+            .unwrap();
+
+        assert_eq!(outputs.len(), 1);
+        assert_close(&outputs[0].attention.hidden, &[4.0, 6.0, 0.0, 0.0]);
+        assert_close(&outputs[0].feed_forward.projected, &[0.0, 0.0, 0.0, 0.0]);
+        assert_close(&outputs[0].hidden, &outputs[0].attention.hidden);
+    }
+
+    #[test]
+    fn swiglu_split_applies_silu_gate() {
+        let actual = swiglu_split(&[0.0, 1.0], &[2.0, 3.0]).unwrap();
+        assert_close(&actual, &[0.0, 3.0 / (1.0 + (-1.0f32).exp())]);
+    }
+
+    #[test]
+    fn slow_ar_layer_skeleton_rejects_bad_weight_shapes() {
+        let shape = toy_shape();
+        let ffn_norm = [1.0; 4];
+        let feed_forward_w1 = vec![0.0; shape.hidden_size * shape.feed_forward_size];
+        let feed_forward_w2 = vec![0.0; shape.feed_forward_size * shape.hidden_size];
+        let feed_forward_w3 = vec![0.0; shape.hidden_size * shape.feed_forward_size];
         let layer = SlowArLayerSkeleton {
             shape,
             attention_norm_weight: &[1.0; 4],
@@ -598,6 +751,10 @@ mod tests {
             k_norm_weight: &[1.0; 2],
             wqkv_weight: &[0.0; 3],
             output_weight: &[0.0; 16],
+            ffn_norm_weight: &ffn_norm,
+            feed_forward_w1_weight: &feed_forward_w1,
+            feed_forward_w2_weight: &feed_forward_w2,
+            feed_forward_w3_weight: &feed_forward_w3,
         };
         let spec = KvCacheSpec {
             ggml_type: GgmlType::F16,
@@ -650,6 +807,102 @@ mod tests {
         assert!(all_finite(&actual.hidden));
         assert_close(cache.key_token(0, 0).unwrap(), &actual.key);
         assert_close(cache.value_token(0, 0).unwrap(), &actual.value);
+
+        let mut block_cache = SlowArKvCache::new(graph.kv_cache, 1).unwrap();
+        let block = weights
+            .skeleton(shape)
+            .forward_block_prefill_sequence(&[hidden], &mut block_cache, 0, 0)
+            .unwrap()
+            .remove(0);
+        assert_eq!(block.feed_forward.normalized.len(), shape.hidden_size);
+        assert_eq!(block.feed_forward.gate.len(), shape.feed_forward_size);
+        assert_eq!(block.feed_forward.up.len(), shape.feed_forward_size);
+        assert_eq!(block.feed_forward.activated.len(), shape.feed_forward_size);
+        assert_eq!(block.feed_forward.projected.len(), shape.hidden_size);
+        assert_eq!(block.hidden.len(), shape.hidden_size);
+        assert!(all_finite(&block.feed_forward.normalized));
+        assert!(all_finite(&block.feed_forward.gate));
+        assert!(all_finite(&block.feed_forward.up));
+        assert!(all_finite(&block.feed_forward.activated));
+        assert!(all_finite(&block.feed_forward.projected));
+        assert!(all_finite(&block.hidden));
+    }
+
+    struct ToyLayerWeights {
+        attention_norm: Vec<f32>,
+        q_norm: Vec<f32>,
+        k_norm: Vec<f32>,
+        wqkv: Vec<f32>,
+        output: Vec<f32>,
+        ffn_norm: Vec<f32>,
+        feed_forward_w1: Vec<f32>,
+        feed_forward_w2: Vec<f32>,
+        feed_forward_w3: Vec<f32>,
+    }
+
+    impl ToyLayerWeights {
+        fn skeleton(&self, shape: SlowArLayerShape) -> SlowArLayerSkeleton<'_> {
+            SlowArLayerSkeleton {
+                shape,
+                attention_norm_weight: &self.attention_norm,
+                q_norm_weight: &self.q_norm,
+                k_norm_weight: &self.k_norm,
+                wqkv_weight: &self.wqkv,
+                output_weight: &self.output,
+                ffn_norm_weight: &self.ffn_norm,
+                feed_forward_w1_weight: &self.feed_forward_w1,
+                feed_forward_w2_weight: &self.feed_forward_w2,
+                feed_forward_w3_weight: &self.feed_forward_w3,
+            }
+        }
+    }
+
+    fn toy_shape() -> SlowArLayerShape {
+        SlowArLayerShape {
+            hidden_size: 4,
+            feed_forward_size: 2,
+            head_count: 2,
+            head_count_kv: 1,
+            head_dim: 2,
+            rope_base: 10_000.0,
+            rms_norm_eps: 0.0,
+        }
+    }
+
+    fn toy_attention_weights(shape: SlowArLayerShape) -> ToyLayerWeights {
+        ToyLayerWeights {
+            attention_norm: vec![0.5, 1.0, 1.0, 1.0],
+            q_norm: vec![std::f32::consts::FRAC_1_SQRT_2; 2],
+            k_norm: vec![std::f32::consts::FRAC_1_SQRT_2; 2],
+            wqkv: output_major_weight(
+                shape.hidden_size,
+                shape.wqkv_out().unwrap(),
+                &[
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    vec![0.0; 4],
+                    vec![0.0; 4],
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    vec![0.0; 4],
+                    vec![3.0, 0.0, 0.0, 0.0],
+                    vec![0.0; 4],
+                ],
+            ),
+            output: output_major_weight(
+                shape.q_size().unwrap(),
+                shape.hidden_size,
+                &[
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    vec![0.0, 0.0, 2.0, 0.0],
+                    vec![0.0; 4],
+                    vec![0.0; 4],
+                ],
+            ),
+            ffn_norm: vec![1.0; shape.hidden_size],
+            feed_forward_w1: vec![0.0; shape.hidden_size * shape.feed_forward_size],
+            feed_forward_w2: vec![0.0; shape.feed_forward_size * shape.hidden_size],
+            feed_forward_w3: vec![0.0; shape.hidden_size * shape.feed_forward_size],
+        }
     }
 
     fn output_major_weight(input_dim: usize, output_dim: usize, rows: &[Vec<f32>]) -> Vec<f32> {
