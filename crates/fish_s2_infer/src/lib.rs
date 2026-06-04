@@ -12,7 +12,8 @@ pub use engine::{EngineConfig, InferenceEngine, SynthesisRequest};
 pub use error::{InferError, Result};
 pub use paths::{default_tokenizer_path, ensure_project_dirs, models_dir, project_root};
 pub use registry::{
-    FastArLayerWeights, SlowArLayerWeights, TensorRole, TensorSpec, TransformerTensorRegistry,
+    ArGraphSpec, DualArGraphSpec, FastArLayerWeights, KvCacheSpec, SlowArLayerWeights, TensorRole,
+    TensorSpec, TransformerTensorRegistry,
 };
 pub use tokenizer::{bytelevel_encode_utf8, gpt2_byte_to_unicode, S2Tokenizer, TokenizedText};
 pub use wav::pcm_to_wav;

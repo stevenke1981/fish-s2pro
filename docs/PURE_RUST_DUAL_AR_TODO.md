@@ -94,7 +94,7 @@
 
 *Depends on: Phase 2, 3*
 
-- [ ] **4.1** Extract graph spec from s2.cpp: layers, GQA (32h/8kv), RoPE base 1M, QK norm, hidden size, vocab. **Partial:** Rust `TransformerTensorRegistry` now validates Slow-AR/Fast-AR weight names and key shapes from the transformer GGUF; GQA/RoPE/cache math still needs s2.cpp confirmation.
+- [x] **4.1** Extract graph spec from s2.cpp: layers, GQA (32h/8kv), RoPE base 1M, QK norm, hidden size, vocab. Rust `TransformerTensorRegistry` now validates Slow-AR/Fast-AR weight names, key shapes, metadata hparams, attention/GQA split, RoPE base, and Slow-AR KV cache layout from the transformer GGUF. Details are in `docs/S2_PRO_TRANSFORMER_REGISTRY.md`; forward math starts in 4.2+.
 - [ ] **4.2** Implement prefill + decode step with **KV cache** (separate Slow-AR `gallocr` equivalent).
 - [ ] **4.3** Quantized matmul: `f16`, `q8_0`, `q4_k_m` — match ggml op semantics (or delegate to ggml via Path B).
 - [ ] **4.4** Sampling: temperature, top_p, top_k — match `PipelineParams` defaults in `s2_engine_ffi.cpp`.
