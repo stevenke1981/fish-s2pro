@@ -84,12 +84,23 @@ impl GgufFile {
         let tensor = self
             .tensor(name)
             .ok_or_else(|| CoreError::Message(format!("tensor not found: {name}")))?;
+        self.read_tensor_bytes(tensor, tensor.byte_len()?)
+    }
+
+    pub fn tensor_bytes_prefix(&self, name: &str, max_len: usize) -> Result<Vec<u8>> {
+        let tensor = self
+            .tensor(name)
+            .ok_or_else(|| CoreError::Message(format!("tensor not found: {name}")))?;
+        self.read_tensor_bytes(tensor, tensor.byte_len()?.min(max_len))
+    }
+
+    fn read_tensor_bytes(&self, tensor: &GgufTensorInfo, len: usize) -> Result<Vec<u8>> {
         let mut file = File::open(&self.path).map_err(CoreError::Io)?;
         file.seek(SeekFrom::Start(
             tensor.absolute_offset(self.tensor_data_start),
         ))
         .map_err(CoreError::Io)?;
-        let mut bytes = vec![0u8; tensor.byte_len()?];
+        let mut bytes = vec![0u8; len];
         file.read_exact(&mut bytes).map_err(CoreError::Io)?;
         Ok(bytes)
     }
@@ -501,25 +512,119 @@ mod tests {
     #[test]
     #[ignore = "requires local S2 Pro GGUF files in models/"]
     fn opens_local_s2_pro_model_pair_when_present() {
-        let model_dir = std::env::var("FISH_S2_MODEL_DIR").unwrap_or_else(|_| "models".into());
-        let transformer = find_one(Path::new(&model_dir), "transformer-only.gguf");
-        let codec = find_one(Path::new(&model_dir), "codec-only.gguf");
+        let model_dir = local_model_dir();
+        let transformer = find_one(&model_dir, "transformer-only.gguf");
+        let codec = find_one(&model_dir, "codec-only.gguf");
 
-        for path in [transformer, codec] {
-            let gguf = GgufFile::open(&path).unwrap();
-            assert!(gguf.version >= 2);
-            assert!(!gguf.tensors.is_empty(), "no tensors in {}", path.display());
-            assert!(gguf
-                .metadata
-                .iter()
-                .any(|(key, _)| key == "general.architecture"));
-            let first = gguf.tensors[0].name.clone();
-            assert!(
-                !gguf.tensor_bytes(&first).unwrap().is_empty(),
-                "empty first tensor bytes in {}",
-                path.display()
-            );
-        }
+        assert_transformer_gguf(&transformer);
+        assert_codec_gguf(&codec);
+    }
+
+    fn assert_transformer_gguf(path: &Path) {
+        let gguf = GgufFile::open(path).unwrap();
+        assert_eq!(gguf.version, 3);
+        assert_eq!(
+            metadata_value(&gguf, "general.architecture"),
+            Some("fish-speech")
+        );
+        assert_eq!(gguf.tensors.len(), 358);
+        assert_layer_count(&gguf, "layers", 36);
+        assert_layer_count(&gguf, "fast_layers", 4);
+        assert_tensor(&gguf, "codebook_embeddings.weight", &[2560, 40960]);
+        assert_tensor(&gguf, "embeddings.weight", &[2560, 155776]);
+        assert_tensor(&gguf, "fast_embeddings.weight", &[2560, 4096]);
+        assert_tensor(&gguf, "fast_layers.0.attention.wqkv.weight", &[2560, 6144]);
+        assert_tensor(&gguf, "fast_layers.0.attention.wo.weight", &[4096, 2560]);
+        assert_tensor(&gguf, "fast_output.weight", &[2560, 4096]);
+        assert_tensor(&gguf, "layers.0.attention.q_norm.weight", &[128]);
+        assert_tensor(&gguf, "layers.0.attention.wqkv.weight", &[2560, 6144]);
+        assert_tensor(&gguf, "layers.0.attention.wo.weight", &[4096, 2560]);
+        assert_tensor(&gguf, "layers.0.feed_forward.w1.weight", &[2560, 9728]);
+        assert_tensor(&gguf, "norm.weight", &[2560]);
+        assert!(!gguf
+            .tensor_bytes_prefix("codebook_embeddings.weight", 4096)
+            .unwrap()
+            .is_empty());
+    }
+
+    fn assert_codec_gguf(path: &Path) {
+        let gguf = GgufFile::open(path).unwrap();
+        assert_eq!(gguf.version, 3);
+        assert_eq!(
+            metadata_value(&gguf, "general.architecture"),
+            Some("fish-speech-codec")
+        );
+        assert_eq!(gguf.tensors.len(), 461);
+        assert_tensor(&gguf, "encoder.block.0.conv.weight", &[7, 1, 64]);
+        assert_tensor(
+            &gguf,
+            "encoder.block.4.block.5.causal_mask",
+            &[16384, 16384],
+        );
+        assert_tensor(
+            &gguf,
+            "encoder.block.4.block.5.layers.0.attention.wqkv.weight",
+            &[1024, 3072],
+        );
+        assert_tensor(
+            &gguf,
+            "quantizer.semantic_quantizer.quantizers.0.codebook.weight",
+            &[8, 4096],
+        );
+        assert_tensor(
+            &gguf,
+            "quantizer.quantizer.quantizers.0.codebook.weight",
+            &[8, 1024],
+        );
+        assert_tensor(
+            &gguf,
+            "quantizer.pre_module.layers.0.attention.wqkv.weight",
+            &[1024, 3072],
+        );
+        assert_tensor(
+            &gguf,
+            "quantizer.post_module.layers.0.attention.wqkv.weight",
+            &[1024, 3072],
+        );
+        assert_tensor(&gguf, "decoder.model.0.conv.weight", &[7, 1024, 1536]);
+        assert_tensor(&gguf, "decoder.model.6.conv.weight", &[7, 96, 1]);
+        assert!(!gguf
+            .tensor_bytes_prefix("encoder.block.0.conv.weight", 4096)
+            .unwrap()
+            .is_empty());
+    }
+
+    fn assert_tensor(gguf: &GgufFile, name: &str, dimensions: &[u64]) {
+        let tensor = gguf
+            .tensor(name)
+            .unwrap_or_else(|| panic!("missing tensor {name}"));
+        assert_eq!(tensor.ggml_type, GgmlType::F16);
+        assert_eq!(tensor.dimensions, dimensions);
+    }
+
+    fn assert_layer_count(gguf: &GgufFile, prefix: &str, expected: usize) {
+        let mut layers = gguf
+            .tensors
+            .iter()
+            .filter_map(|tensor| {
+                tensor
+                    .name
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .and_then(|rest| rest.split_once('.'))
+                    .and_then(|(layer, _)| layer.parse::<usize>().ok())
+            })
+            .collect::<Vec<_>>();
+        layers.sort_unstable();
+        layers.dedup();
+        assert_eq!(layers.len(), expected, "{prefix} layer count");
+    }
+
+    fn metadata_value<'a>(gguf: &'a GgufFile, key: &str) -> Option<&'a str> {
+        gguf.metadata
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.as_str())
     }
 
     fn write_tiny_gguf(path: &Path) {
@@ -562,5 +667,18 @@ mod tests {
                     .is_some_and(|name| name.ends_with(suffix))
             })
             .unwrap_or_else(|| panic!("missing *{suffix} in {}", root.display()))
+    }
+
+    fn local_model_dir() -> std::path::PathBuf {
+        std::env::var("FISH_S2_MODEL_DIR").map_or_else(
+            |_| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .nth(2)
+                    .expect("workspace root")
+                    .join("models")
+            },
+            std::path::PathBuf::from,
+        )
     }
 }

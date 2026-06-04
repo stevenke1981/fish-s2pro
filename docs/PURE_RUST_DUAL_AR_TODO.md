@@ -71,8 +71,8 @@
   - Option 2: Crate `gguf` / `llama-gguf` for metadata + map tensors by name
   - Option 3: FFI only for load, Rust for orchestration (hybrid)
 - [x] **2.2** Implement `GgufTensorView` + name lookup matching s2.cpp tensor names (dump names from C++ once). Current API: `GgufFile::open`, `GgufFile::tensor`, `GgufFile::tensor_names`, `GgufFile::tensor_bytes`, and `GgufTensorInfo`.
-- [ ] **2.3** Unit test: load `models/*-transformer-only.gguf`, assert `general.architecture`, tensor count, key weight shapes. Ignored local smoke test is present; key weight names/shapes still need real S2 Pro tensor-name dump.
-- [ ] **2.4** Same for `*-codec-only.gguf`. Ignored local smoke test is present; codec key weight names/shapes still need real S2 Pro tensor-name dump.
+- [x] **2.3** Unit test: load `models/*-transformer-only.gguf`, assert `general.architecture`, tensor count, key weight shapes. Verified with `s2-pro-f16-transformer-only.gguf`; full dump at `output/s2-pro-f16-transformer-tensors.tsv`.
+- [x] **2.4** Same for `*-codec-only.gguf`. Verified with `s2-pro-f16-codec-only.gguf`; full dump at `output/s2-pro-f16-codec-tensors.tsv`.
 
 **Acceptance:** Rust can enumerate and read at least one weight tensor bytes without C++.
 
