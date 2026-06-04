@@ -24,13 +24,15 @@ pub use codec::{
     forward_codec_upsample, rvq_decode_latents, rvq_lookup_codes, CodecDecodeLatentsResult,
     CodecDecoderF16Weights, CodecDecoderWeights, CodecDownsampleF16Weights,
     CodecDownsampleStageF16Weights, CodecDownsampleStageWeights, CodecDownsampleWeights,
-    CodecEncodeStageResult, CodecF16Weights, CodecPostModuleF16Weights, CodecPostModuleResult,
-    CodecPreModuleF16Weights, CodecQuantizerF16Weights, CodecQuantizerWeights,
-    CodecRvqLookupResult, CodecTensorDumpRow, CodecTensorRegistry, CodecTensorRoleInfo,
-    CodecTransformerLayerF16Weights, CodecTransformerLayerWeights, CodecUpsampleF16Weights,
-    CodecUpsampleResult, CodecUpsampleStageF16Weights, CodecUpsampleStageWeights,
-    CodecUpsampleWeights, CodecWaveformResult, CODEC_ARCHITECTURE, CODEC_DECODER_RATES,
-    CODEC_RESIDUAL_QUANTIZERS, CODEC_SAMPLE_RATE, CODEC_TRANSFORMER_LAYERS,
+    CodecEncodeStageResult, CodecEncoderBlockF16Weights, CodecEncoderBlockWeights,
+    CodecEncoderF16Weights, CodecEncoderWeights, CodecF16Weights, CodecPostModuleF16Weights,
+    CodecPostModuleResult, CodecPreModuleF16Weights, CodecQuantizerF16Weights,
+    CodecQuantizerWeights, CodecRvqLookupResult, CodecTensorDumpRow, CodecTensorRegistry,
+    CodecTensorRoleInfo, CodecTransformerLayerF16Weights, CodecTransformerLayerWeights,
+    CodecUpsampleF16Weights, CodecUpsampleResult, CodecUpsampleStageF16Weights,
+    CodecUpsampleStageWeights, CodecUpsampleWeights, CodecWaveformResult, CODEC_ARCHITECTURE,
+    CODEC_DECODER_RATES, CODEC_ENCODER_RATES, CODEC_RESIDUAL_QUANTIZERS, CODEC_SAMPLE_RATE,
+    CODEC_TRANSFORMER_LAYERS,
 };
 pub use engine::{EngineConfig, InferenceEngine, SynthesisRequest};
 pub use error::{InferError, Result};

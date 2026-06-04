@@ -33,6 +33,15 @@ pub const CODEC_UPSAMPLE_FACTOR: usize = 2;
 pub const CODEC_CONVNEXT_KERNEL_SIZE: usize = 7;
 pub const CODEC_CONVNEXT_EXPANDED_SIZE: usize = 4096;
 pub const CODEC_CONVNEXT_NORM_EPS: f32 = 1e-6;
+pub const CODEC_ENCODER_BLOCK_COUNT: usize = 4;
+pub const CODEC_ENCODER_ENTRY_CHANNELS: usize = 64;
+pub const CODEC_ENCODER_RATES: [usize; CODEC_ENCODER_BLOCK_COUNT] = [4, 8, 16, 16];
+pub const CODEC_ENCODER_CHANNELS: [usize; CODEC_ENCODER_BLOCK_COUNT + 1] =
+    [64, 128, 256, 512, 1024];
+pub const CODEC_ENCODER_TRANSFORMER_LAYERS: usize = 4;
+pub const CODEC_ENCODER_TRANSFORMER_CONTEXT: u64 = 16_384;
+pub const CODEC_ENCODER_TAIL_BLOCK: usize = CODEC_ENCODER_BLOCK_COUNT + 1;
+pub const CODEC_ENCODER_OUTPUT_BLOCK: usize = CODEC_ENCODER_BLOCK_COUNT + 2;
 pub const CODEC_LATENT_DIM: usize = 1024;
 pub const CODEC_DECODER_ENTRY_CHANNELS: usize = 1536;
 pub const CODEC_DECODER_BLOCK_COUNT: usize = 4;
@@ -49,6 +58,7 @@ pub struct CodecTensorRegistry {
     tensors: BTreeMap<String, GgufTensorInfo>,
     ordered_tensors: Vec<GgufTensorInfo>,
     prefix_counts: BTreeMap<String, usize>,
+    encoder: CodecEncoderWeights,
     semantic_quantizer: CodecQuantizerWeights,
     residual_quantizers: Vec<CodecQuantizerWeights>,
     pre_module_layers: Vec<CodecTransformerLayerWeights>,
@@ -80,6 +90,7 @@ impl CodecTensorRegistry {
             .collect::<BTreeMap<_, _>>();
         let ordered_tensors = gguf.tensors.clone();
         let prefix_counts = prefix_counts(&ordered_tensors);
+        let encoder = CodecEncoderWeights::new();
         let semantic_quantizer = CodecQuantizerWeights::semantic();
         let residual_quantizers = (0..CODEC_RESIDUAL_QUANTIZERS)
             .map(CodecQuantizerWeights::residual)
@@ -100,6 +111,7 @@ impl CodecTensorRegistry {
             tensors,
             ordered_tensors,
             prefix_counts,
+            encoder,
             semantic_quantizer,
             residual_quantizers,
             pre_module_layers,
@@ -123,6 +135,10 @@ impl CodecTensorRegistry {
 
     pub fn prefix_counts(&self) -> &BTreeMap<String, usize> {
         &self.prefix_counts
+    }
+
+    pub fn encoder(&self) -> &CodecEncoderWeights {
+        &self.encoder
     }
 
     pub fn semantic_quantizer(&self) -> &CodecQuantizerWeights {
@@ -198,6 +214,7 @@ impl CodecTensorRegistry {
         for quantizer in &self.residual_quantizers {
             validate_quantizer(&self.tensors, quantizer, false, &mut failures);
         }
+        validate_encoder(&self.tensors, &self.encoder, &mut failures);
         validate_module(
             &self.tensors,
             "quantizer.pre_module",
@@ -1031,6 +1048,76 @@ impl CodecResidualUnitWeights {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecEncoderBlockWeights {
+    pub index: usize,
+    pub residual_1: CodecResidualUnitWeights,
+    pub residual_2: CodecResidualUnitWeights,
+    pub residual_3: CodecResidualUnitWeights,
+    pub snake_alpha: String,
+    pub down_conv_weight: String,
+    pub down_conv_bias: String,
+    pub transformer_layers: Vec<CodecTransformerLayerWeights>,
+    pub transformer_norm_weight: Option<String>,
+}
+
+impl CodecEncoderBlockWeights {
+    fn new(index: usize) -> Self {
+        let prefix = format!("encoder.block.{index}.block");
+        let transformer_layers = if index == CODEC_ENCODER_BLOCK_COUNT {
+            (0..CODEC_ENCODER_TRANSFORMER_LAYERS)
+                .map(|layer| CodecTransformerLayerWeights::new(format!("{prefix}.5"), layer))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let transformer_norm_weight =
+            (index == CODEC_ENCODER_BLOCK_COUNT).then(|| format!("{prefix}.5.norm.weight"));
+        Self {
+            index,
+            residual_1: CodecResidualUnitWeights::new(format!("{prefix}.0")),
+            residual_2: CodecResidualUnitWeights::new(format!("{prefix}.1")),
+            residual_3: CodecResidualUnitWeights::new(format!("{prefix}.2")),
+            snake_alpha: format!("{prefix}.3.alpha"),
+            down_conv_weight: format!("{prefix}.4.conv.weight"),
+            down_conv_bias: format!("{prefix}.4.conv.bias"),
+            transformer_layers,
+            transformer_norm_weight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecEncoderWeights {
+    pub entry_conv_weight: String,
+    pub entry_conv_bias: String,
+    pub blocks: Vec<CodecEncoderBlockWeights>,
+    pub tail_snake_alpha: String,
+    pub output_conv_weight: String,
+    pub output_conv_bias: String,
+}
+
+impl CodecEncoderWeights {
+    pub fn new() -> Self {
+        Self {
+            entry_conv_weight: "encoder.block.0.conv.weight".to_string(),
+            entry_conv_bias: "encoder.block.0.conv.bias".to_string(),
+            blocks: (1..=CODEC_ENCODER_BLOCK_COUNT)
+                .map(CodecEncoderBlockWeights::new)
+                .collect(),
+            tail_snake_alpha: format!("encoder.block.{CODEC_ENCODER_TAIL_BLOCK}.alpha"),
+            output_conv_weight: format!("encoder.block.{CODEC_ENCODER_OUTPUT_BLOCK}.conv.weight"),
+            output_conv_bias: format!("encoder.block.{CODEC_ENCODER_OUTPUT_BLOCK}.conv.bias"),
+        }
+    }
+}
+
+impl Default for CodecEncoderWeights {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodecDecoderBlockWeights {
     pub index: usize,
     pub snake_alpha: String,
@@ -1107,6 +1194,119 @@ impl CodecResidualUnitF16Weights {
             conv1_weight: F16TensorView::from_gguf(gguf, &names.conv1_weight)?,
             conv1_bias: F16TensorView::from_gguf(gguf, &names.conv1_bias)?,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecEncoderBlockF16Weights {
+    pub index: usize,
+    pub residual_1: CodecResidualUnitF16Weights,
+    pub residual_2: CodecResidualUnitF16Weights,
+    pub residual_3: CodecResidualUnitF16Weights,
+    pub snake_alpha: F16TensorView,
+    pub down_conv_weight: F16TensorView,
+    pub down_conv_bias: F16TensorView,
+    pub transformer_layers: Vec<CodecTransformerLayerF16Weights>,
+    pub transformer_norm_weight: Option<F16TensorView>,
+}
+
+impl CodecEncoderBlockF16Weights {
+    fn from_names(gguf: &GgufFile, names: &CodecEncoderBlockWeights) -> Result<Self> {
+        Ok(Self {
+            index: names.index,
+            residual_1: CodecResidualUnitF16Weights::from_names(gguf, &names.residual_1)?,
+            residual_2: CodecResidualUnitF16Weights::from_names(gguf, &names.residual_2)?,
+            residual_3: CodecResidualUnitF16Weights::from_names(gguf, &names.residual_3)?,
+            snake_alpha: F16TensorView::from_gguf(gguf, &names.snake_alpha)?,
+            down_conv_weight: F16TensorView::from_gguf(gguf, &names.down_conv_weight)?,
+            down_conv_bias: F16TensorView::from_gguf(gguf, &names.down_conv_bias)?,
+            transformer_layers: names
+                .transformer_layers
+                .iter()
+                .map(|layer| CodecTransformerLayerF16Weights::from_names(gguf, layer))
+                .collect::<Result<Vec<_>>>()?,
+            transformer_norm_weight: names
+                .transformer_norm_weight
+                .as_deref()
+                .map(|name| F16TensorView::from_gguf(gguf, name))
+                .transpose()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecEncoderF16Weights {
+    pub entry_conv_weight: F16TensorView,
+    pub entry_conv_bias: F16TensorView,
+    pub blocks: Vec<CodecEncoderBlockF16Weights>,
+    pub tail_snake_alpha: F16TensorView,
+    pub output_conv_weight: F16TensorView,
+    pub output_conv_bias: F16TensorView,
+}
+
+impl CodecEncoderF16Weights {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        let names = CodecEncoderWeights::new();
+        Self::from_gguf_names(gguf, &names)
+    }
+
+    pub fn from_gguf_names(gguf: &GgufFile, names: &CodecEncoderWeights) -> Result<Self> {
+        let weights = Self {
+            entry_conv_weight: F16TensorView::from_gguf(gguf, &names.entry_conv_weight)?,
+            entry_conv_bias: F16TensorView::from_gguf(gguf, &names.entry_conv_bias)?,
+            blocks: names
+                .blocks
+                .iter()
+                .map(|block| CodecEncoderBlockF16Weights::from_names(gguf, block))
+                .collect::<Result<Vec<_>>>()?,
+            tail_snake_alpha: F16TensorView::from_gguf(gguf, &names.tail_snake_alpha)?,
+            output_conv_weight: F16TensorView::from_gguf(gguf, &names.output_conv_weight)?,
+            output_conv_bias: F16TensorView::from_gguf(gguf, &names.output_conv_bias)?,
+        };
+        weights.validate_dimensions()?;
+        Ok(weights)
+    }
+
+    fn validate_dimensions(&self) -> Result<()> {
+        validate_f16_dims(
+            self.entry_conv_weight.name(),
+            self.entry_conv_weight.dimensions(),
+            &[7, 1, CODEC_ENCODER_ENTRY_CHANNELS],
+        )?;
+        validate_f16_dims(
+            self.entry_conv_bias.name(),
+            self.entry_conv_bias.dimensions(),
+            &[CODEC_ENCODER_ENTRY_CHANNELS],
+        )?;
+        if self.blocks.len() != CODEC_ENCODER_BLOCK_COUNT {
+            return Err(InferError::Message(format!(
+                "encoder block count mismatch: expected {}, got {}",
+                CODEC_ENCODER_BLOCK_COUNT,
+                self.blocks.len()
+            )));
+        }
+        for (offset, block) in self.blocks.iter().enumerate() {
+            let index = offset + 1;
+            let in_channels = CODEC_ENCODER_CHANNELS[offset];
+            let out_channels = CODEC_ENCODER_CHANNELS[offset + 1];
+            validate_encoder_block_f16_dims(block, index, in_channels, out_channels)?;
+        }
+        validate_f16_dims(
+            self.tail_snake_alpha.name(),
+            self.tail_snake_alpha.dimensions(),
+            &[1, CODEC_LATENT_DIM, 1],
+        )?;
+        validate_f16_dims(
+            self.output_conv_weight.name(),
+            self.output_conv_weight.dimensions(),
+            &[3, CODEC_LATENT_DIM, CODEC_LATENT_DIM],
+        )?;
+        validate_f16_dims(
+            self.output_conv_bias.name(),
+            self.output_conv_bias.dimensions(),
+            &[CODEC_LATENT_DIM],
+        )?;
+        Ok(())
     }
 }
 
@@ -1949,6 +2149,192 @@ fn validate_quantizer(
     }
 }
 
+fn validate_encoder(
+    tensors: &BTreeMap<String, GgufTensorInfo>,
+    weights: &CodecEncoderWeights,
+    failures: &mut Vec<String>,
+) {
+    validate_tensor(
+        tensors,
+        &weights.entry_conv_weight,
+        &[7, 1, CODEC_ENCODER_ENTRY_CHANNELS as u64],
+        failures,
+    );
+    validate_tensor(
+        tensors,
+        &weights.entry_conv_bias,
+        &[CODEC_ENCODER_ENTRY_CHANNELS as u64],
+        failures,
+    );
+    if weights.blocks.len() != CODEC_ENCODER_BLOCK_COUNT {
+        failures.push(format!(
+            "encoder block count: expected {}, got {}",
+            CODEC_ENCODER_BLOCK_COUNT,
+            weights.blocks.len()
+        ));
+    }
+    for (offset, block) in weights.blocks.iter().enumerate() {
+        let index = offset + 1;
+        let in_channels = CODEC_ENCODER_CHANNELS[offset] as u64;
+        let out_channels = CODEC_ENCODER_CHANNELS[offset + 1] as u64;
+        validate_encoder_block(tensors, block, index, in_channels, out_channels, failures);
+    }
+    validate_tensor(
+        tensors,
+        &weights.tail_snake_alpha,
+        &[1, CODEC_LATENT_DIM as u64, 1],
+        failures,
+    );
+    validate_tensor(
+        tensors,
+        &weights.output_conv_weight,
+        &[3, CODEC_LATENT_DIM as u64, CODEC_LATENT_DIM as u64],
+        failures,
+    );
+    validate_tensor(
+        tensors,
+        &weights.output_conv_bias,
+        &[CODEC_LATENT_DIM as u64],
+        failures,
+    );
+}
+
+fn validate_encoder_block(
+    tensors: &BTreeMap<String, GgufTensorInfo>,
+    block: &CodecEncoderBlockWeights,
+    index: usize,
+    in_channels: u64,
+    out_channels: u64,
+    failures: &mut Vec<String>,
+) {
+    if block.index != index {
+        failures.push(format!(
+            "encoder block index: expected {index}, got {}",
+            block.index
+        ));
+    }
+    validate_residual_unit(tensors, &block.residual_1, in_channels, failures);
+    validate_residual_unit(tensors, &block.residual_2, in_channels, failures);
+    validate_residual_unit(tensors, &block.residual_3, in_channels, failures);
+    validate_tensor(tensors, &block.snake_alpha, &[1, in_channels, 1], failures);
+    validate_tensor(
+        tensors,
+        &block.down_conv_weight,
+        &[
+            CODEC_ENCODER_RATES[index - 1] as u64,
+            in_channels,
+            out_channels,
+        ],
+        failures,
+    );
+    validate_tensor(tensors, &block.down_conv_bias, &[out_channels], failures);
+    if index == CODEC_ENCODER_BLOCK_COUNT {
+        validate_encoder_transformer(tensors, block, failures);
+    } else if !block.transformer_layers.is_empty() || block.transformer_norm_weight.is_some() {
+        failures.push(format!(
+            "encoder block {index} unexpectedly has transformer weights"
+        ));
+    }
+}
+
+fn validate_residual_unit(
+    tensors: &BTreeMap<String, GgufTensorInfo>,
+    unit: &CodecResidualUnitWeights,
+    channels: u64,
+    failures: &mut Vec<String>,
+) {
+    validate_tensor(tensors, &unit.snake0_alpha, &[1, channels, 1], failures);
+    validate_tensor(
+        tensors,
+        &unit.conv0_weight,
+        &[7, channels, channels],
+        failures,
+    );
+    validate_tensor(tensors, &unit.conv0_bias, &[channels], failures);
+    validate_tensor(tensors, &unit.snake1_alpha, &[1, channels, 1], failures);
+    validate_tensor(
+        tensors,
+        &unit.conv1_weight,
+        &[1, channels, channels],
+        failures,
+    );
+    validate_tensor(tensors, &unit.conv1_bias, &[channels], failures);
+}
+
+fn validate_encoder_transformer(
+    tensors: &BTreeMap<String, GgufTensorInfo>,
+    block: &CodecEncoderBlockWeights,
+    failures: &mut Vec<String>,
+) {
+    if block.transformer_layers.len() != CODEC_ENCODER_TRANSFORMER_LAYERS {
+        failures.push(format!(
+            "encoder transformer layer count: expected {}, got {}",
+            CODEC_ENCODER_TRANSFORMER_LAYERS,
+            block.transformer_layers.len()
+        ));
+    }
+    let prefix = format!("encoder.block.{}.block.5", block.index);
+    validate_tensor(
+        tensors,
+        &format!("{prefix}.freqs_cis"),
+        &[2, CODEC_FREQ_HEADS, CODEC_ENCODER_TRANSFORMER_CONTEXT],
+        failures,
+    );
+    validate_tensor(
+        tensors,
+        &format!("{prefix}.causal_mask"),
+        &[
+            CODEC_ENCODER_TRANSFORMER_CONTEXT,
+            CODEC_ENCODER_TRANSFORMER_CONTEXT,
+        ],
+        failures,
+    );
+    if let Some(norm) = &block.transformer_norm_weight {
+        validate_tensor(tensors, norm, &[CODEC_LATENT_DIM as u64], failures);
+    } else {
+        failures.push(format!("missing {prefix}.norm.weight"));
+    }
+    for layer in &block.transformer_layers {
+        validate_codec_transformer_layer(tensors, layer, failures);
+    }
+}
+
+fn validate_codec_transformer_layer(
+    tensors: &BTreeMap<String, GgufTensorInfo>,
+    layer: &CodecTransformerLayerWeights,
+    failures: &mut Vec<String>,
+) {
+    let specs = [
+        (
+            &layer.attention_wqkv,
+            vec![CODEC_HIDDEN_SIZE, CODEC_ATTENTION_WQKV_OUT],
+        ),
+        (
+            &layer.attention_output,
+            vec![CODEC_HIDDEN_SIZE, CODEC_HIDDEN_SIZE],
+        ),
+        (
+            &layer.feed_forward_w1,
+            vec![CODEC_HIDDEN_SIZE, CODEC_FEED_FORWARD_SIZE],
+        ),
+        (
+            &layer.feed_forward_w3,
+            vec![CODEC_HIDDEN_SIZE, CODEC_FEED_FORWARD_SIZE],
+        ),
+        (
+            &layer.feed_forward_w2,
+            vec![CODEC_FEED_FORWARD_SIZE, CODEC_HIDDEN_SIZE],
+        ),
+        (&layer.ffn_norm, vec![CODEC_HIDDEN_SIZE]),
+        (&layer.attention_norm, vec![CODEC_HIDDEN_SIZE]),
+        (&layer.attention_layer_scale, vec![CODEC_HIDDEN_SIZE]),
+        (&layer.ffn_layer_scale, vec![CODEC_HIDDEN_SIZE]),
+    ];
+    for (name, dimensions) in specs {
+        validate_tensor(tensors, name, &dimensions, failures);
+    }
+}
+
 fn validate_module(
     tensors: &BTreeMap<String, GgufTensorInfo>,
     module: &str,
@@ -2668,6 +3054,97 @@ fn validate_f16_dims(name: &str, actual: &[usize], expected: &[usize]) -> Result
     }
 }
 
+fn validate_encoder_block_f16_dims(
+    block: &CodecEncoderBlockF16Weights,
+    index: usize,
+    in_channels: usize,
+    out_channels: usize,
+) -> Result<()> {
+    if block.index != index {
+        return Err(InferError::Message(format!(
+            "encoder block index mismatch: expected {index}, got {}",
+            block.index
+        )));
+    }
+    validate_residual_unit_f16_dims(&block.residual_1, in_channels)?;
+    validate_residual_unit_f16_dims(&block.residual_2, in_channels)?;
+    validate_residual_unit_f16_dims(&block.residual_3, in_channels)?;
+    validate_f16_dims(
+        block.snake_alpha.name(),
+        block.snake_alpha.dimensions(),
+        &[1, in_channels, 1],
+    )?;
+    validate_f16_dims(
+        block.down_conv_weight.name(),
+        block.down_conv_weight.dimensions(),
+        &[CODEC_ENCODER_RATES[index - 1], in_channels, out_channels],
+    )?;
+    validate_f16_dims(
+        block.down_conv_bias.name(),
+        block.down_conv_bias.dimensions(),
+        &[out_channels],
+    )?;
+    if index == CODEC_ENCODER_BLOCK_COUNT {
+        if block.transformer_layers.len() != CODEC_ENCODER_TRANSFORMER_LAYERS {
+            return Err(InferError::Message(format!(
+                "encoder transformer layer count mismatch: expected {}, got {}",
+                CODEC_ENCODER_TRANSFORMER_LAYERS,
+                block.transformer_layers.len()
+            )));
+        }
+        for layer in &block.transformer_layers {
+            layer.validate_dimensions()?;
+        }
+        let norm = block
+            .transformer_norm_weight
+            .as_ref()
+            .ok_or_else(|| InferError::Message("missing encoder transformer norm".into()))?;
+        validate_f16_dims(norm.name(), norm.dimensions(), &[CODEC_LATENT_DIM])?;
+    } else if !block.transformer_layers.is_empty() || block.transformer_norm_weight.is_some() {
+        return Err(InferError::Message(format!(
+            "encoder block {index} unexpectedly has transformer weights"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_residual_unit_f16_dims(
+    unit: &CodecResidualUnitF16Weights,
+    channels: usize,
+) -> Result<()> {
+    validate_f16_dims(
+        unit.snake0_alpha.name(),
+        unit.snake0_alpha.dimensions(),
+        &[1, channels, 1],
+    )?;
+    validate_f16_dims(
+        unit.conv0_weight.name(),
+        unit.conv0_weight.dimensions(),
+        &[7, channels, channels],
+    )?;
+    validate_f16_dims(
+        unit.conv0_bias.name(),
+        unit.conv0_bias.dimensions(),
+        &[channels],
+    )?;
+    validate_f16_dims(
+        unit.snake1_alpha.name(),
+        unit.snake1_alpha.dimensions(),
+        &[1, channels, 1],
+    )?;
+    validate_f16_dims(
+        unit.conv1_weight.name(),
+        unit.conv1_weight.dimensions(),
+        &[1, channels, channels],
+    )?;
+    validate_f16_dims(
+        unit.conv1_bias.name(),
+        unit.conv1_bias.dimensions(),
+        &[channels],
+    )?;
+    Ok(())
+}
+
 fn scale_channels(values: &[f32], scale: &[f32]) -> Result<Vec<f32>> {
     if values.len() != scale.len() {
         return Err(InferError::Message(format!(
@@ -2943,11 +3420,50 @@ mod tests {
 
     #[test]
     #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn loads_encoder_frontend_f16_weights_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let weights = CodecEncoderF16Weights::from_gguf(&gguf).expect("encoder f16 weights");
+
+        assert_eq!(
+            weights.entry_conv_weight.dimensions(),
+            &[7, 1, CODEC_ENCODER_ENTRY_CHANNELS]
+        );
+        assert_eq!(weights.blocks.len(), CODEC_ENCODER_BLOCK_COUNT);
+        assert_eq!(
+            weights.blocks[0].down_conv_weight.dimensions(),
+            &[4, 64, 128]
+        );
+        assert_eq!(
+            weights.blocks[1].down_conv_weight.dimensions(),
+            &[8, 128, 256]
+        );
+        assert_eq!(
+            weights.blocks[2].down_conv_weight.dimensions(),
+            &[16, 256, 512]
+        );
+        assert_eq!(
+            weights.blocks[3].down_conv_weight.dimensions(),
+            &[16, 512, 1024]
+        );
+        assert_eq!(
+            weights.blocks[3].transformer_layers.len(),
+            CODEC_ENCODER_TRANSFORMER_LAYERS
+        );
+        assert_eq!(
+            weights.output_conv_weight.dimensions(),
+            &[3, CODEC_LATENT_DIM, CODEC_LATENT_DIM]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
     fn loads_local_codec_registry_from_gguf() {
         let path = fixture_codec_path().expect("codec gguf");
         let registry = CodecTensorRegistry::from_gguf_file(path).expect("codec registry");
         assert_eq!(registry.architecture, CODEC_ARCHITECTURE);
         assert_eq!(registry.tensor_count, 461);
+        assert_eq!(registry.encoder().blocks.len(), CODEC_ENCODER_BLOCK_COUNT);
         assert_eq!(
             registry.residual_quantizers().len(),
             CODEC_RESIDUAL_QUANTIZERS

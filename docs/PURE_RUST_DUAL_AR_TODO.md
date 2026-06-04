@@ -153,6 +153,8 @@
   - [x] Pre-slice: bind/validate `quantizer.downsample.{0,1}` ConvNeXt weights and `quantizer.pre_module` transformer F16 weights for the encode path.
   - [x] Port quantizer downsample + pre-module forward from encoder latents to VQ input (`forward_codec_quantizer_encode_stage` synthetic-latent GGUF smoke).
   - [ ] Port encoder frontend from mono PCM to 1024-d latent frames.
+    - [x] Bind/validate encoder frontend F16 weights: entry conv, 4 residual/downsample blocks, block4 transformer, tail/output conv.
+    - [ ] Port encoder frontend forward math and parity hook.
   - [ ] Port VQ nearest-code search for semantic + 9 residual codebooks.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
@@ -360,4 +362,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: quantizer encode-stage downsample + pre-module forward smoke passes; next: Rust PCM encoder frontend and VQ search*
+*Last updated: 2026-06-05 — Codec/RVQ: encoder frontend F16 mapping smoke passes; next: Rust PCM encoder frontend forward and VQ search*
