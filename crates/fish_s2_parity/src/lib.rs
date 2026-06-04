@@ -196,6 +196,7 @@ pub fn compare_slow_ar_dumps(
 ) -> SlowArParityReport {
     let mut failures = Vec::new();
     compare_metadata(expected, actual, &mut failures);
+    let tolerance = effective_slow_ar_tolerance(expected, actual, tolerance);
     let expected_tokens = normalized_slow_ar_tokens(expected, "expected", &mut failures);
     let actual_tokens = normalized_slow_ar_tokens(actual, "actual", &mut failures);
     if expected_tokens.len() != actual_tokens.len() {
@@ -272,6 +273,26 @@ pub fn compare_slow_ar_dumps(
         passed: failures.is_empty(),
         tensor_deltas,
         failures,
+    }
+}
+
+fn effective_slow_ar_tolerance(
+    expected: &SlowArDump,
+    actual: &SlowArDump,
+    tolerance: SlowArTensorTolerance,
+) -> SlowArTensorTolerance {
+    let layer_count = expected
+        .layer_count
+        .unwrap_or(1)
+        .max(actual.layer_count.unwrap_or(1));
+    if layer_count < 36 {
+        return tolerance;
+    }
+    SlowArTensorTolerance {
+        max_l2_delta: tolerance.max_l2_delta.max(0.75),
+        max_mean_abs_delta: tolerance.max_mean_abs_delta.max(6e-3),
+        max_max_abs_delta: tolerance.max_max_abs_delta.max(1.0),
+        max_first8_mae: tolerance.max_first8_mae.max(0.20),
     }
 }
 
@@ -774,6 +795,26 @@ mod tests {
             .failures
             .iter()
             .any(|f| f.contains("layer_count mismatch")));
+    }
+
+    #[test]
+    fn applies_full_stack_tolerance_only_for_36_layers() {
+        let mut expected: SlowArDump =
+            serde_json::from_str(test_slow_ar_full_block_dump_json()).unwrap();
+        expected.layer_count = Some(36);
+        let mut actual = expected.clone();
+        actual.block_hidden.as_mut().unwrap().max_abs += 0.9;
+        let report = compare_slow_ar_dumps(&expected, &actual, SlowArTensorTolerance::default());
+        assert!(report.passed, "{report:#?}");
+
+        expected.layer_count = Some(2);
+        actual.layer_count = Some(2);
+        let report = compare_slow_ar_dumps(&expected, &actual, SlowArTensorTolerance::default());
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.contains("token0.block_hidden.max_abs")));
     }
 
     #[test]
