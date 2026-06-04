@@ -10,7 +10,7 @@ use fish_s2_core::gguf::{GgmlType, GgufFile, GgufTensorInfo};
 
 use crate::attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape};
 use crate::error::{InferError, Result};
-use crate::tensor::{embedding_lookup_rows, linear, rms_norm, F16TensorView};
+use crate::tensor::{embedding_lookup_rows, linear, rms_norm, round_f32_to_f16, F16TensorView};
 use crate::wav::read_wav_mono_f32;
 
 pub const CODEC_ARCHITECTURE: &str = "fish-speech-codec";
@@ -2280,7 +2280,7 @@ fn causal_conv_1d_frame_major(
                         out_channel,
                     );
                     let input_index = source_frame * in_ch + in_channel;
-                    sum += padded[input_index] * weight[weight_index];
+                    sum += round_f32_to_f16(padded[input_index]) * weight[weight_index];
                 }
             }
             output[out_frame * out_ch + out_channel] = sum;

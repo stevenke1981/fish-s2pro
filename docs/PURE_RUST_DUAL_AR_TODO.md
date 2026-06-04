@@ -167,6 +167,7 @@
     - Current parity blocker: the harness runs with UTF-8 prompt text via file path, but exact codes still differ on the tiny reference WAV because encoder-stage parity already fails there (`hidden_l2_delta≈0.97`, `hidden_mean_abs_delta≈0.0067`).
     - Added encoder-stage checkpoint dumps (`entry_conv`, `encoder_block_1..4`, `tail_snake`, `output_conv`) to both Rust and the generated s2.cpp helper. On `reference_tiny.wav`, `entry_conv` and `encoder_block_1` are near parity, while the first large mismatch starts at `encoder_block_2` (`l2_delta≈0.96`), so the next debug slice should inspect block 2 residual/downsample conv math and weight layout.
     - Extended checkpoints inside encoder residual units (`snake0`, `conv0`, `snake1`, `conv1`, `residual_out`). Synthetic 2048 and synthetic 5120 both pass parity, including the zero-padding case. The reference tiny WAV remains the targeted blocker: block 2 drift starts small at `encoder_block_2.residual_1.snake0` (`l2_delta≈0.011`) and grows through residual 3/downsample (`residual_3≈0.389`, `down_conv≈0.962`). Next likely fix target: high-amplitude Snake/conv numerical parity for the reference audio path, not sample-count padding.
+    - Fixed Rust codec conv parity by emulating ggml `conv_1d` F16 im2col input rounding (`round-to-nearest-even` f32→f16 before each conv tap). `dump_encoder_stage_parity.ps1 -WavInput output\s2cpp_reference_codes_dump\reference_tiny.wav` now passes (`hidden_l2_delta≈0.00045`). The full prompt-code parity script still needs a longer/narrower run; a `-MaxNewTokens 1` attempt exceeded the local 4-minute smoke timeout and was stopped after the generated-code subprocess kept running.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency
@@ -373,4 +374,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: residual-unit checkpoints show tiny-WAV drift accumulates through encoder block 2 Snake/conv path; synthetic padded parity still passes*
+*Last updated: 2026-06-05 — Codec/RVQ: Rust conv now emulates ggml F16 im2col rounding and reference tiny WAV encoder-stage parity passes; next: rerun/narrow full prompt-code parity*

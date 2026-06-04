@@ -166,7 +166,7 @@ pub fn linear(
     Ok(output)
 }
 
-fn f16_bits_to_f32(bits: u16) -> f32 {
+pub(crate) fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign = (u32::from(bits & 0x8000)) << 16;
     let exponent = (bits >> 10) & 0x1f;
     let fraction = bits & 0x03ff;
@@ -189,6 +189,48 @@ fn f16_bits_to_f32(bits: u16) -> f32 {
     }
 }
 
+pub(crate) fn f32_to_f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x007f_ffff;
+
+    if exponent == 0xff {
+        if mantissa == 0 {
+            return sign | 0x7c00;
+        }
+        return sign | 0x7e00;
+    }
+
+    let half_exp = exponent - 127 + 15;
+    if half_exp >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if half_exp <= 0 {
+        if half_exp < -10 {
+            return sign;
+        }
+        let mantissa = mantissa | 0x0080_0000;
+        let shift = (14 - half_exp) as u32;
+        let rounded = mantissa + ((1u32 << (shift - 1)) - 1) + ((mantissa >> shift) & 1);
+        return sign | ((rounded >> shift) as u16);
+    }
+
+    let rounded = mantissa + 0x0000_0fff + ((mantissa >> 13) & 1);
+    if rounded & 0x0080_0000 != 0 {
+        let next_exp = half_exp + 1;
+        if next_exp >= 0x1f {
+            return sign | 0x7c00;
+        }
+        return sign | ((next_exp as u16) << 10);
+    }
+    sign | ((half_exp as u16) << 10) | ((rounded >> 13) as u16)
+}
+
+pub(crate) fn round_f32_to_f16(value: f32) -> f32 {
+    f16_bits_to_f32(f32_to_f16_bits(value))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -203,6 +245,16 @@ mod tests {
         assert_eq!(tensor.name(), "toy");
         assert_eq!(tensor.dimensions(), &[2, 2]);
         assert_eq!(tensor.values(), &[1.0, -2.0, 0.5, 4.0]);
+    }
+
+    #[test]
+    fn rounds_f32_to_f16_values() {
+        assert_eq!(round_f32_to_f16(1.0), 1.0);
+        assert_eq!(round_f32_to_f16(-2.0), -2.0);
+        assert_eq!(round_f32_to_f16(0.5), 0.5);
+        assert_eq!(f32_to_f16_bits(f32::INFINITY), 0x7c00);
+        assert_eq!(f32_to_f16_bits(f32::NEG_INFINITY), 0xfc00);
+        assert_eq!(f32_to_f16_bits(f32::NAN) & 0x7c00, 0x7c00);
     }
 
     #[test]
