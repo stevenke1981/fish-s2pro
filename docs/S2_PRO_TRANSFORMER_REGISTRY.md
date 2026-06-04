@@ -218,6 +218,6 @@ cargo clippy --all-targets -- -D warnings
 
 Next Phase 4 work:
 
-- Add full generated-codes C++ parity around `fish_s2_codes_dump`.
 - Start codec/RVQ tensor registry and decode fixtures for `s2-pro-f16-codec-only.gguf`.
+- Add reference-prompt generated-codes parity fixtures.
 - Add typed views for quantized weights needed by non-F16 model variants.
