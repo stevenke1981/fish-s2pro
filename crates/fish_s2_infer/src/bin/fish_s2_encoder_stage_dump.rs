@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use fish_s2_core::gguf::GgufFile;
 use fish_s2_infer::{
-    forward_codec_encoder_frontend, models_dir, project_root, read_wav_mono_f32,
-    CodecEncoderF16Weights, InferError, CODEC_FRAME_LENGTH, CODEC_SAMPLE_RATE,
+    forward_codec_encoder_frontend_with_checkpoints, models_dir, project_root, read_wav_mono_f32,
+    CodecEncoderF16Weights, CodecEncoderFrontendCheckpoint, InferError, CODEC_FRAME_LENGTH,
+    CODEC_SAMPLE_RATE,
 };
 
 #[derive(Debug, serde::Serialize)]
@@ -19,6 +20,7 @@ struct EncoderStageDump {
     hidden_mean_abs: f64,
     hidden_max_abs: f64,
     hidden_first8: Vec<f64>,
+    checkpoints: Vec<CodecEncoderFrontendCheckpoint>,
 }
 
 fn main() -> fish_s2_infer::Result<()> {
@@ -29,7 +31,7 @@ fn main() -> fish_s2_infer::Result<()> {
         Some(path) => read_wav_mono_f32(path, CODEC_SAMPLE_RATE)?,
         None => synthetic_pcm(args.samples),
     };
-    let result = forward_codec_encoder_frontend(&audio, &weights)?;
+    let (result, checkpoints) = forward_codec_encoder_frontend_with_checkpoints(&audio, &weights)?;
     let dump = EncoderStageDump {
         backend: "rust",
         input_samples: result.input_samples,
@@ -46,6 +48,7 @@ fn main() -> fish_s2_infer::Result<()> {
             .take(8)
             .map(|value| f64::from(*value))
             .collect(),
+        checkpoints,
     };
     write_json(&args.output, &dump)?;
     println!(

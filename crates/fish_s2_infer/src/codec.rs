@@ -971,6 +971,18 @@ pub struct CodecEncoderFrontendResult {
     pub hidden: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CodecEncoderFrontendCheckpoint {
+    pub name: String,
+    pub frames: usize,
+    pub channels: usize,
+    pub hidden_len: usize,
+    pub hidden_l2: f64,
+    pub hidden_mean_abs: f64,
+    pub hidden_max_abs: f64,
+    pub hidden_first8: Vec<f64>,
+}
+
 pub fn forward_codec_post_module(
     latents: &[f32],
     n_frames: u32,
@@ -1076,11 +1088,33 @@ pub fn forward_codec_encoder_frontend(
     audio: &[f32],
     weights: &CodecEncoderF16Weights,
 ) -> Result<CodecEncoderFrontendResult> {
+    forward_codec_encoder_frontend_impl(audio, weights, false).map(|(result, _)| result)
+}
+
+pub fn forward_codec_encoder_frontend_with_checkpoints(
+    audio: &[f32],
+    weights: &CodecEncoderF16Weights,
+) -> Result<(
+    CodecEncoderFrontendResult,
+    Vec<CodecEncoderFrontendCheckpoint>,
+)> {
+    forward_codec_encoder_frontend_impl(audio, weights, true)
+}
+
+fn forward_codec_encoder_frontend_impl(
+    audio: &[f32],
+    weights: &CodecEncoderF16Weights,
+    collect_checkpoints: bool,
+) -> Result<(
+    CodecEncoderFrontendResult,
+    Vec<CodecEncoderFrontendCheckpoint>,
+)> {
     let input_samples = u32::try_from(audio.len())
         .map_err(|_| InferError::Message("encoder input sample count overflows u32".into()))?;
     let padded_samples = pad_sample_count(audio.len(), CODEC_FRAME_LENGTH)?;
     let mut current = vec![0.0f32; padded_samples];
     current[..audio.len()].copy_from_slice(audio);
+    let mut checkpoints = Vec::new();
 
     current = causal_conv_1d_frame_major(
         &current,
@@ -1096,11 +1130,27 @@ pub fn forward_codec_encoder_frontend(
     )?;
     let mut frames = padded_samples;
     let mut channels = CODEC_ENCODER_ENTRY_CHANNELS;
+    maybe_push_encoder_checkpoint(
+        &mut checkpoints,
+        collect_checkpoints,
+        "entry_conv",
+        frames,
+        channels,
+        &current,
+    )?;
 
     for (block, &stride) in weights.blocks.iter().zip(CODEC_ENCODER_RATES.iter()) {
         current = forward_codec_encoder_block(&current, frames, channels, stride, block)?;
         frames = encoder_downsample_output_frames(frames, stride)?;
         channels = encoder_block_output_channels(block.index)?;
+        maybe_push_encoder_checkpoint(
+            &mut checkpoints,
+            collect_checkpoints,
+            format!("encoder_block_{}", block.index),
+            frames,
+            channels,
+            &current,
+        )?;
     }
 
     current = snake_activation_frame_major(
@@ -1108,6 +1158,14 @@ pub fn forward_codec_encoder_frontend(
         frames,
         channels,
         weights.tail_snake_alpha.values(),
+    )?;
+    maybe_push_encoder_checkpoint(
+        &mut checkpoints,
+        collect_checkpoints,
+        "tail_snake",
+        frames,
+        channels,
+        &current,
     )?;
     current = causal_conv_1d_frame_major(
         &current,
@@ -1121,17 +1179,87 @@ pub fn forward_codec_encoder_frontend(
         weights.output_conv_weight.values(),
         weights.output_conv_bias.values(),
     )?;
+    maybe_push_encoder_checkpoint(
+        &mut checkpoints,
+        collect_checkpoints,
+        "output_conv",
+        frames,
+        CODEC_LATENT_DIM,
+        &current,
+    )?;
     let output_frames = u32::try_from(frames)
         .map_err(|_| InferError::Message("encoder output_frames overflows u32".into()))?;
     let padded_samples_u32 = u32::try_from(padded_samples)
         .map_err(|_| InferError::Message("encoder padded_samples overflows u32".into()))?;
-    Ok(CodecEncoderFrontendResult {
-        input_samples,
-        padded_samples: padded_samples_u32,
-        output_frames,
-        hidden_dim: CODEC_LATENT_DIM,
-        hidden: current,
-    })
+    Ok((
+        CodecEncoderFrontendResult {
+            input_samples,
+            padded_samples: padded_samples_u32,
+            output_frames,
+            hidden_dim: CODEC_LATENT_DIM,
+            hidden: current,
+        },
+        checkpoints,
+    ))
+}
+
+fn maybe_push_encoder_checkpoint(
+    checkpoints: &mut Vec<CodecEncoderFrontendCheckpoint>,
+    enabled: bool,
+    name: impl Into<String>,
+    frames: usize,
+    channels: usize,
+    hidden: &[f32],
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    validate_frame_major_len("encoder checkpoint", hidden, frames, channels)?;
+    checkpoints.push(encoder_checkpoint(name, frames, channels, hidden));
+    Ok(())
+}
+
+fn encoder_checkpoint(
+    name: impl Into<String>,
+    frames: usize,
+    channels: usize,
+    hidden: &[f32],
+) -> CodecEncoderFrontendCheckpoint {
+    let hidden_l2 = hidden
+        .iter()
+        .map(|value| {
+            let v = f64::from(*value);
+            v * v
+        })
+        .sum::<f64>()
+        .sqrt();
+    let hidden_mean_abs = if hidden.is_empty() {
+        0.0
+    } else {
+        hidden
+            .iter()
+            .map(|value| f64::from(value.abs()))
+            .sum::<f64>()
+            / hidden.len() as f64
+    };
+    let hidden_max_abs = hidden
+        .iter()
+        .map(|value| f64::from(value.abs()))
+        .fold(0.0, f64::max);
+    CodecEncoderFrontendCheckpoint {
+        name: name.into(),
+        frames,
+        channels,
+        hidden_len: hidden.len(),
+        hidden_l2,
+        hidden_mean_abs,
+        hidden_max_abs,
+        hidden_first8: hidden
+            .iter()
+            .take(8)
+            .map(|value| f64::from(*value))
+            .collect(),
+    }
 }
 
 /// RVQ latents after lookup → post-module transformer → quantizer upsample (s2.cpp

@@ -52,6 +52,22 @@ struct Args {
     int threads = 4;
 };
 
+struct TensorCheckpoint {
+    std::string name;
+    ggml_tensor * tensor = nullptr;
+};
+
+struct StageSummary {
+    std::string name;
+    int32_t frames = 0;
+    int32_t channels = 0;
+    size_t hidden_len = 0;
+    double hidden_l2 = 0.0;
+    double hidden_mean_abs = 0.0;
+    double hidden_max_abs = 0.0;
+    std::vector<double> hidden_first8;
+};
+
 void print_help() {
     std::cerr
         << "Usage: s2_encoder_stage_dump --codec <codec.gguf> --output <encoder_stage.json> "
@@ -236,6 +252,36 @@ double max_abs(const std::vector<float> & values) {
     return max_value;
 }
 
+StageSummary summarize_stage(const std::string & name, ggml_tensor * tensor) {
+    StageSummary summary;
+    summary.name = name;
+    summary.channels = static_cast<int32_t>(tensor->ne[0]);
+    summary.frames = static_cast<int32_t>(tensor->ne[1]);
+    summary.hidden_len = static_cast<size_t>(tensor->ne[0]) * static_cast<size_t>(tensor->ne[1]);
+    std::vector<float> values(summary.hidden_len);
+    ggml_backend_tensor_get(tensor, values.data(), 0, values.size() * sizeof(float));
+    summary.hidden_l2 = l2(values);
+    summary.hidden_mean_abs = mean_abs(values);
+    summary.hidden_max_abs = max_abs(values);
+    for (size_t i = 0; i < values.size() && i < 8; ++i) {
+        summary.hidden_first8.push_back(static_cast<double>(values[i]));
+    }
+    return summary;
+}
+
+json stage_summary_to_json(const StageSummary & summary) {
+    json doc;
+    doc["name"] = summary.name;
+    doc["frames"] = summary.frames;
+    doc["channels"] = summary.channels;
+    doc["hidden_len"] = summary.hidden_len;
+    doc["hidden_l2"] = summary.hidden_l2;
+    doc["hidden_mean_abs"] = summary.hidden_mean_abs;
+    doc["hidden_max_abs"] = summary.hidden_max_abs;
+    doc["hidden_first8"] = summary.hidden_first8;
+    return doc;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -265,6 +311,7 @@ int main(int argc, char ** argv) {
     std::copy(audio.begin(), audio.end(), audio_padded.begin());
 
     std::vector<float> latent_out;
+    std::vector<StageSummary> checkpoint_summaries;
     int32_t hidden_dim = 0;
     int32_t output_frames = 0;
     {
@@ -278,6 +325,15 @@ int main(int argc, char ** argv) {
         }
 
         s2::transformer_inputs enc_inp;
+        std::vector<TensorCheckpoint> checkpoints;
+        auto checkpoint = [&](const std::string & name, ggml_tensor * x) -> ggml_tensor * {
+            ggml_tensor * copy = ggml_cpy(
+                ctx,
+                x,
+                ggml_new_tensor_2d(ctx, GGML_TYPE_F32, x->ne[0], x->ne[1]));
+            checkpoints.push_back({name, copy});
+            return x;
+        };
         ggml_tensor * audio_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, padded);
         ggml_tensor * latent = nullptr;
         try {
@@ -288,6 +344,7 @@ int main(int argc, char ** argv) {
                 audio_in,
                 1,
                 1);
+            checkpoint("entry_conv", x);
 
             for (size_t i = 0; i < codec.impl_->encoder_rates.size(); ++i) {
                 const std::string prefix =
@@ -304,6 +361,7 @@ int main(int argc, char ** argv) {
                     codec.impl_->encoder_rates[i],
                     n_layers,
                     enc_inp);
+                checkpoint("encoder_block_" + std::to_string(i + 1), x);
             }
 
             const int last = static_cast<int>(codec.impl_->encoder_rates.size()) + 1;
@@ -316,6 +374,7 @@ int main(int argc, char ** argv) {
                 ctx,
                 x,
                 req(codec.impl_->tprefix + "encoder.block." + std::to_string(last) + ".alpha"));
+            checkpoint("tail_snake", x);
             x = s2::causal_conv_1d(
                 ctx,
                 req(codec.impl_->tprefix + "encoder.block." + std::to_string(last + 1) + ".conv.weight"),
@@ -323,6 +382,7 @@ int main(int argc, char ** argv) {
                 x,
                 1,
                 1);
+            checkpoint("output_conv", x);
             latent = ggml_cpy(ctx, x, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, x->ne[0], x->ne[1]));
         } catch (const std::exception & e) {
             std::cerr << "encoder stage build failed: " << e.what() << "\n";
@@ -331,6 +391,9 @@ int main(int argc, char ** argv) {
         }
 
         ggml_cgraph * gf = ggml_new_graph_custom(ctx, 131072, false);
+        for (const TensorCheckpoint & item : checkpoints) {
+            ggml_build_forward_expand(gf, item.tensor);
+        }
         ggml_build_forward_expand(gf, latent);
 
         ggml_gallocr_t allocr =
@@ -376,6 +439,9 @@ int main(int argc, char ** argv) {
         output_frames = static_cast<int32_t>(latent->ne[1]);
         latent_out.resize(static_cast<size_t>(latent->ne[0]) * latent->ne[1]);
         ggml_backend_tensor_get(latent, latent_out.data(), 0, latent_out.size() * sizeof(float));
+        for (const TensorCheckpoint & item : checkpoints) {
+            checkpoint_summaries.push_back(summarize_stage(item.name, item.tensor));
+        }
         ggml_gallocr_free(allocr);
         ggml_free(ctx);
     }
@@ -393,6 +459,10 @@ int main(int argc, char ** argv) {
     doc["hidden_first8"] = json::array();
     for (size_t i = 0; i < latent_out.size() && i < 8; ++i) {
         doc["hidden_first8"].push_back(static_cast<double>(latent_out[i]));
+    }
+    doc["checkpoints"] = json::array();
+    for (const StageSummary & summary : checkpoint_summaries) {
+        doc["checkpoints"].push_back(stage_summary_to_json(summary));
     }
 
     const std::string json_utf8 = doc.dump(2) + "\n";

@@ -165,6 +165,7 @@
   - [x] Add reference prompt-code parity harness.
     - `fish_s2_reference_codes_dump --prompt-codes-format`, `fish_s2_parity compare-prompt-codes`, and `dump_reference_generated_codes_parity.ps1` now produce/compare Rust vs s2.cpp prompt-code fixtures.
     - Current parity blocker: the harness runs with UTF-8 prompt text via file path, but exact codes still differ on the tiny reference WAV because encoder-stage parity already fails there (`hidden_l2_delta≈0.97`, `hidden_mean_abs_delta≈0.0067`).
+    - Added encoder-stage checkpoint dumps (`entry_conv`, `encoder_block_1..4`, `tail_snake`, `output_conv`) to both Rust and the generated s2.cpp helper. On `reference_tiny.wav`, `entry_conv` and `encoder_block_1` are near parity, while the first large mismatch starts at `encoder_block_2` (`l2_delta≈0.96`), so the next debug slice should inspect block 2 residual/downsample conv math and weight layout.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency
@@ -371,4 +372,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: prompt-code harness runs; next: debug tiny-WAV encoder-stage parity before exact prompt-code parity*
+*Last updated: 2026-06-05 — Codec/RVQ: encoder-stage checkpoints locate tiny-WAV parity drift at encoder block 2; next: debug block 2 residual/downsample conv before exact prompt-code parity*
