@@ -3,60 +3,58 @@ use std::path::{Path, PathBuf};
 
 use fish_s2_core::gguf::GgufFile;
 use fish_s2_infer::{
-    forward_codec_encoder_frontend, models_dir, project_root, read_wav_mono_f32,
-    CodecEncoderF16Weights, InferError, CODEC_FRAME_LENGTH, CODEC_SAMPLE_RATE,
+    encode_reference_audio, encode_reference_wav_file, models_dir, project_root,
+    CodecReferenceAudioResult, CodecReferenceEncoderF16Weights, InferError, CODEC_FRAME_LENGTH,
 };
 
 #[derive(Debug, serde::Serialize)]
-struct EncoderStageDump {
+struct ReferenceCodesDump {
     backend: &'static str,
+    code_layout: &'static str,
     input_samples: u32,
     padded_samples: u32,
-    output_frames: u32,
-    hidden_dim: usize,
-    hidden_len: usize,
-    hidden_l2: f64,
-    hidden_mean_abs: f64,
-    hidden_max_abs: f64,
-    hidden_first8: Vec<f64>,
+    encoder_frames: u32,
+    n_frames: u32,
+    num_codebooks: u32,
+    codes_len: usize,
+    codes: Vec<i32>,
+    final_residual_l2: Vec<f32>,
 }
 
 fn main() -> fish_s2_infer::Result<()> {
     let args = Args::parse()?;
     let gguf = GgufFile::open(&args.codec).map_err(|err| InferError::Message(err.to_string()))?;
-    let weights = CodecEncoderF16Weights::from_gguf(&gguf)?;
-    let audio = match args.wav_input.as_ref() {
-        Some(path) => read_wav_mono_f32(path, CODEC_SAMPLE_RATE)?,
-        None => synthetic_pcm(args.samples),
+    let weights = CodecReferenceEncoderF16Weights::from_gguf(&gguf)?;
+    let result = match args.wav_input.as_ref() {
+        Some(path) => encode_reference_wav_file(path, &weights)?,
+        None => encode_reference_audio(&synthetic_pcm(args.samples), &weights)?,
     };
-    let result = forward_codec_encoder_frontend(&audio, &weights)?;
-    let dump = EncoderStageDump {
-        backend: "rust",
-        input_samples: result.input_samples,
-        padded_samples: result.padded_samples,
-        output_frames: result.output_frames,
-        hidden_dim: result.hidden_dim,
-        hidden_len: result.hidden.len(),
-        hidden_l2: l2(&result.hidden),
-        hidden_mean_abs: mean_abs(&result.hidden),
-        hidden_max_abs: max_abs(&result.hidden),
-        hidden_first8: result
-            .hidden
-            .iter()
-            .take(8)
-            .map(|value| f64::from(*value))
-            .collect(),
-    };
+    let dump = ReferenceCodesDump::from_result(result);
     write_json(&args.output, &dump)?;
     println!(
-        "wrote {} ({} -> {} samples, {} frames x {} hidden)",
+        "wrote {} ({} codebooks x {} frames)",
         args.output.display(),
-        dump.input_samples,
-        dump.padded_samples,
-        dump.output_frames,
-        dump.hidden_dim
+        dump.num_codebooks,
+        dump.n_frames
     );
     Ok(())
+}
+
+impl ReferenceCodesDump {
+    fn from_result(result: CodecReferenceAudioResult) -> Self {
+        Self {
+            backend: "rust",
+            code_layout: "codebook_major",
+            input_samples: result.input_samples,
+            padded_samples: result.padded_samples,
+            encoder_frames: result.encoder_frames,
+            n_frames: result.quantizer_frames,
+            num_codebooks: result.num_codebooks,
+            codes_len: result.codes.len(),
+            codes: result.codes,
+            final_residual_l2: result.final_residual_l2,
+        }
+    }
 }
 
 struct Args {
@@ -71,7 +69,7 @@ impl Args {
         let mut codec = models_dir().join("s2-pro-f16-codec-only.gguf");
         let mut output = project_root()
             .join("output")
-            .join("encoder_stage_synthetic_rust.json");
+            .join("reference_codes_synthetic_rust.json");
         let mut wav_input = None;
         let mut samples = CODEC_FRAME_LENGTH;
         let mut args = std::env::args().skip(1);
@@ -120,7 +118,7 @@ fn synthetic_pcm(samples: usize) -> Vec<f32> {
         .collect()
 }
 
-fn write_json(path: &Path, dump: &EncoderStageDump) -> fish_s2_infer::Result<()> {
+fn write_json(path: &Path, dump: &ReferenceCodesDump) -> fish_s2_infer::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -131,38 +129,9 @@ fn write_json(path: &Path, dump: &EncoderStageDump) -> fish_s2_infer::Result<()>
     Ok(())
 }
 
-fn l2(values: &[f32]) -> f64 {
-    values
-        .iter()
-        .map(|value| {
-            let v = f64::from(*value);
-            v * v
-        })
-        .sum::<f64>()
-        .sqrt()
-}
-
-fn mean_abs(values: &[f32]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    values
-        .iter()
-        .map(|value| f64::from(value.abs()))
-        .sum::<f64>()
-        / values.len() as f64
-}
-
-fn max_abs(values: &[f32]) -> f64 {
-    values
-        .iter()
-        .map(|value| f64::from(value.abs()))
-        .fold(0.0, f64::max)
-}
-
 fn print_usage() {
     eprintln!(
-        "Usage: fish_s2_encoder_stage_dump [--codec codec.gguf] [--output encoder_stage.json] \
-         [--samples 2048] [--wav-input reference.wav]"
+        "Usage: fish_s2_reference_codes_dump [--codec codec.gguf] [--wav-input reference.wav] \
+         [--samples N] [--output reference_codes.json]"
     );
 }

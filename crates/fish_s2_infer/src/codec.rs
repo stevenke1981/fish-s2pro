@@ -11,6 +11,7 @@ use fish_s2_core::gguf::{GgmlType, GgufFile, GgufTensorInfo};
 use crate::attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape};
 use crate::error::{InferError, Result};
 use crate::tensor::{embedding_lookup_rows, linear, rms_norm, F16TensorView};
+use crate::wav::read_wav_mono_f32;
 
 pub const CODEC_ARCHITECTURE: &str = "fish-speech-codec";
 pub const CODEC_HIDDEN_SIZE: u64 = 1024;
@@ -931,6 +932,37 @@ pub struct CodecEncodeStageResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct CodecReferenceEncoderF16Weights {
+    pub encoder: CodecEncoderF16Weights,
+    pub quantizer_downsample: CodecDownsampleF16Weights,
+    pub quantizer_pre_module: CodecPreModuleF16Weights,
+    pub rvq: CodecF16Weights,
+}
+
+impl CodecReferenceEncoderF16Weights {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        let registry = CodecTensorRegistry::from_gguf(gguf)?;
+        Ok(Self {
+            encoder: CodecEncoderF16Weights::from_gguf(gguf)?,
+            quantizer_downsample: CodecDownsampleF16Weights::from_gguf_registry(gguf, &registry)?,
+            quantizer_pre_module: CodecPreModuleF16Weights::from_gguf_registry(gguf, &registry)?,
+            rvq: CodecF16Weights::from_gguf_registry(gguf, &registry)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecReferenceAudioResult {
+    pub input_samples: u32,
+    pub padded_samples: u32,
+    pub encoder_frames: u32,
+    pub quantizer_frames: u32,
+    pub num_codebooks: u32,
+    pub codes: Vec<i32>,
+    pub final_residual_l2: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CodecEncoderFrontendResult {
     pub input_samples: u32,
     pub padded_samples: u32,
@@ -1007,6 +1039,37 @@ pub fn forward_codec_quantizer_encode_stage(
         hidden_dim,
         hidden: tokens.into_iter().flatten().collect(),
     })
+}
+
+pub fn encode_reference_audio(
+    audio: &[f32],
+    weights: &CodecReferenceEncoderF16Weights,
+) -> Result<CodecReferenceAudioResult> {
+    let encoder = forward_codec_encoder_frontend(audio, &weights.encoder)?;
+    let quantizer = forward_codec_quantizer_encode_stage(
+        &encoder.hidden,
+        encoder.output_frames,
+        &weights.quantizer_downsample,
+        &weights.quantizer_pre_module,
+    )?;
+    let vq = rvq_encode_latents_nearest(&quantizer.hidden, quantizer.output_frames, &weights.rvq)?;
+    Ok(CodecReferenceAudioResult {
+        input_samples: encoder.input_samples,
+        padded_samples: encoder.padded_samples,
+        encoder_frames: encoder.output_frames,
+        quantizer_frames: quantizer.output_frames,
+        num_codebooks: vq.num_codebooks,
+        codes: vq.codes,
+        final_residual_l2: vq.final_residual_l2,
+    })
+}
+
+pub fn encode_reference_wav_file(
+    path: &Path,
+    weights: &CodecReferenceEncoderF16Weights,
+) -> Result<CodecReferenceAudioResult> {
+    let audio = read_wav_mono_f32(path, CODEC_SAMPLE_RATE)?;
+    encode_reference_audio(&audio, weights)
 }
 
 pub fn forward_codec_encoder_frontend(
@@ -3784,6 +3847,37 @@ mod tests {
         assert_eq!(decoded.latent_dim, hidden_dim);
         assert_eq!(decoded.latents.len(), stage.hidden.len());
         assert!(decoded.latents.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn encodes_reference_audio_to_prompt_codes_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let weights =
+            CodecReferenceEncoderF16Weights::from_gguf(&gguf).expect("reference encoder weights");
+
+        let audio = (0..CODEC_FRAME_LENGTH)
+            .map(|index| (((index % 97) as f32) - 48.0) / 4096.0)
+            .collect::<Vec<_>>();
+        let result = encode_reference_audio(&audio, &weights).expect("reference audio encode");
+
+        assert_eq!(result.input_samples, CODEC_FRAME_LENGTH as u32);
+        assert_eq!(result.padded_samples, CODEC_FRAME_LENGTH as u32);
+        assert_eq!(result.encoder_frames, 4);
+        assert_eq!(result.quantizer_frames, 1);
+        assert_eq!(result.num_codebooks, 1 + CODEC_RESIDUAL_QUANTIZERS as u32);
+        assert_eq!(result.codes.len(), result.num_codebooks as usize);
+        assert!(result
+            .final_residual_l2
+            .iter()
+            .all(|value| value.is_finite()));
+        assert!(result.codes[0] >= 0);
+        assert!(result.codes[0] < CODEC_SEMANTIC_CODEBOOK_SIZE as i32);
+        for code in result.codes.iter().skip(1) {
+            assert!(*code >= 0);
+            assert!(*code < CODEC_RESIDUAL_CODEBOOK_SIZE as i32);
+        }
     }
 
     #[test]

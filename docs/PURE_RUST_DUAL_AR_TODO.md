@@ -159,6 +159,9 @@
     - [x] Add reference WAV loader path for encoder-latent parity (`-WavInput output\waveform_hi_rust.wav` passes).
   - [x] Port VQ nearest-code search for semantic + 9 residual codebooks.
     - Added `rvq_encode_latents_nearest`: in_proj -> nearest codebook row -> out_proj reconstruction -> residual update, with ignored GGUF smoke.
+  - [x] Assemble Rust reference encode API and dump tool.
+    - `encode_reference_audio` / `encode_reference_wav_file` now run encoder frontend -> quantizer encode stage -> VQ nearest codes.
+    - `fish_s2_reference_codes_dump` writes codebook-major JSON for synthetic PCM or `--wav-input`.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency
@@ -365,4 +368,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: VQ nearest-code search implemented with ignored GGUF smoke; next: full reference WAV prompt-code parity*
+*Last updated: 2026-06-05 — Codec/RVQ: Rust reference audio encode API + code dump tool implemented; next: s2.cpp reference prompt-code parity*

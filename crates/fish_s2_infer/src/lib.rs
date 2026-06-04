@@ -19,8 +19,9 @@ pub mod server;
 
 pub use attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape, SlowArKvCache};
 pub use codec::{
-    classify_codec_tensor, decode_waveform, decode_waveform_to_wav, format_codec_dimensions,
-    forward_codec_decoder, forward_codec_encoder_frontend, forward_codec_post_module,
+    classify_codec_tensor, decode_waveform, decode_waveform_to_wav, encode_reference_audio,
+    encode_reference_wav_file, format_codec_dimensions, forward_codec_decoder,
+    forward_codec_encoder_frontend, forward_codec_post_module,
     forward_codec_quantizer_encode_stage, forward_codec_upsample, rvq_decode_latents,
     rvq_encode_latents_nearest, rvq_lookup_codes, CodecDecodeLatentsResult, CodecDecoderF16Weights,
     CodecDecoderWeights, CodecDownsampleF16Weights, CodecDownsampleStageF16Weights,
@@ -28,11 +29,12 @@ pub use codec::{
     CodecEncoderBlockF16Weights, CodecEncoderBlockWeights, CodecEncoderF16Weights,
     CodecEncoderFrontendResult, CodecEncoderWeights, CodecF16Weights, CodecPostModuleF16Weights,
     CodecPostModuleResult, CodecPreModuleF16Weights, CodecQuantizerF16Weights,
-    CodecQuantizerWeights, CodecRvqLookupResult, CodecTensorDumpRow, CodecTensorRegistry,
-    CodecTensorRoleInfo, CodecTransformerLayerF16Weights, CodecTransformerLayerWeights,
-    CodecUpsampleF16Weights, CodecUpsampleResult, CodecUpsampleStageF16Weights,
-    CodecUpsampleStageWeights, CodecUpsampleWeights, CodecVqEncodeResult, CodecWaveformResult,
-    CODEC_ARCHITECTURE, CODEC_DECODER_RATES, CODEC_ENCODER_KERNELS, CODEC_ENCODER_RATES,
+    CodecQuantizerWeights, CodecReferenceAudioResult, CodecReferenceEncoderF16Weights,
+    CodecRvqLookupResult, CodecTensorDumpRow, CodecTensorRegistry, CodecTensorRoleInfo,
+    CodecTransformerLayerF16Weights, CodecTransformerLayerWeights, CodecUpsampleF16Weights,
+    CodecUpsampleResult, CodecUpsampleStageF16Weights, CodecUpsampleStageWeights,
+    CodecUpsampleWeights, CodecVqEncodeResult, CodecWaveformResult, CODEC_ARCHITECTURE,
+    CODEC_DECODER_RATES, CODEC_ENCODER_KERNELS, CODEC_ENCODER_RATES,
     CODEC_ENCODER_TRANSFORMER_WINDOW_SIZE, CODEC_FRAME_LENGTH, CODEC_RESIDUAL_QUANTIZERS,
     CODEC_SAMPLE_RATE, CODEC_TRANSFORMER_LAYERS,
 };
@@ -68,7 +70,7 @@ pub use slow_ar::{
 };
 pub use tensor::{embedding_lookup_rows, linear, rms_norm, F16TensorView};
 pub use tokenizer::{bytelevel_encode_utf8, gpt2_byte_to_unicode, S2Tokenizer, TokenizedText};
-pub use wav::pcm_to_wav;
+pub use wav::{pcm_to_wav, read_wav_mono_f32, wav_mono_f32_from_bytes};
 
 #[cfg(feature = "server")]
 pub use server::{spawn_server, InlineServer, ServerHandle};
