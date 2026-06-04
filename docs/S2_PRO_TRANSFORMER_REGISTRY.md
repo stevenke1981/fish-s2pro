@@ -218,6 +218,6 @@ cargo clippy --all-targets -- -D warnings
 
 Next Phase 4 work:
 
-- Start codec/RVQ tensor registry and decode fixtures for `s2-pro-f16-codec-only.gguf`.
+- Continue codec/RVQ from `docs/S2_PRO_CODEC_REGISTRY.md`: typed F16 codebook/projection views, then RVQ lookup fixture.
 - Add reference-prompt generated-codes parity fixtures.
 - Add typed views for quantized weights needed by non-F16 model variants.

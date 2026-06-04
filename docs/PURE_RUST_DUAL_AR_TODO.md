@@ -118,9 +118,12 @@
 
 ### Package D — Codec/RVQ Decode
 
-- [ ] `fish_s2_infer::codec::CodecTensorRegistry::from_gguf(codec_gguf)`
+- [x] `fish_s2_infer::codec::CodecTensorRegistry::from_gguf(codec_gguf)`
   - Map codec tensors and metadata from `s2-pro-f16-codec-only.gguf`.
-  - Acceptance: tensor name/shape dump parity against `output/s2-pro-f16-codec-tensors.tsv`.
+  - Acceptance: `fish_s2_codec_dump` writes `output/s2-pro-f16-codec-registry.tsv` plus metadata TSV; ignored local GGUF smoke validates 461 tensors, `encoder=128`, `quantizer=244`, `decoder=89`, semantic codebook `8x4096`, and residual quantizers `{0..8}` `8x1024`.
+- [ ] `fish_s2_infer::codec::CodecF16Weights::from_gguf(codec_gguf)`
+  - Bind typed F16 views for semantic/residual codebooks and projection weights without expanding the full decoder yet.
+  - Acceptance: codebook/proj tensors load and validate shapes for generated-codes fixture.
 - [ ] `fish_s2_infer::codec::rvq_decode_codes(codes) -> acoustic_features`
   - Port semantic/residual quantizer dequantization.
   - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook.
@@ -335,4 +338,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-04 — Phase 4/5: SlowArState, sampling, semantic parity, Fast-AR first-frame parity, C++/Rust generated-codes parity; next: codec/RVQ decode*
+*Last updated: 2026-06-04 — Codec/RVQ: codec GGUF registry + tensor/metadata dump; next: typed codec F16 weights + RVQ lookup fixture*

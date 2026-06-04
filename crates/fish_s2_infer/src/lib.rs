@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod codec;
 mod engine;
 mod error;
 pub mod fast_ar;
@@ -16,6 +17,11 @@ mod wav;
 pub mod server;
 
 pub use attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape, SlowArKvCache};
+pub use codec::{
+    classify_codec_tensor, format_codec_dimensions, CodecQuantizerWeights, CodecTensorDumpRow,
+    CodecTensorRegistry, CodecTensorRoleInfo, CodecTransformerLayerWeights, CODEC_ARCHITECTURE,
+    CODEC_RESIDUAL_QUANTIZERS, CODEC_TRANSFORMER_LAYERS,
+};
 pub use engine::{EngineConfig, InferenceEngine, SynthesisRequest};
 pub use error::{InferError, Result};
 pub use fast_ar::{
