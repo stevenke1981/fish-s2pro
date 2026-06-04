@@ -115,6 +115,10 @@ Phase 4.2 prep slice:
   real local GGUF F16 tensors (`attention_norm`, `q_norm`, `k_norm`, `wqkv`,
   `wo`) and feeds them into the single-token skeleton. The ignored fixture loads
   layer 0 and checks shape consistency plus finite outputs.
+- `fish_s2_slow_ar_dump` writes JSON stats for the same layer 0 single-token
+  Rust fixture, including len/L2/mean_abs/max_abs/first8 for normalized, Q, K,
+  V, attention, projection, and final hidden state. This is the Rust side of the
+  next C++ dump parity step.
 
 Root tensor specs:
 
@@ -162,6 +166,7 @@ cargo test -p fish_s2_infer slow_ar::tests
 cargo test -p fish_s2_infer slow_ar::tests::binds_local_layer0_f16_weights_and_runs_single_token_fixture -- --ignored
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
+cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layer0_rust_stats.json
 cargo clippy --all-targets -- -D warnings
 ```
 
