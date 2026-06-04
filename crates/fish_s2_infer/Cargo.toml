@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+fish_s2_core = { path = "../fish_s2_core" }
 byteorder = "1"
 memmap2 = "0.9"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

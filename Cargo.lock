@@ -1288,6 +1288,7 @@ dependencies = [
  "axum",
  "byteorder",
  "cc",
+ "fish_s2_core",
  "memmap2",
  "serde",
  "serde_json",
