@@ -40,6 +40,8 @@ pub const CODEC_ENCODER_CHANNELS: [usize; CODEC_ENCODER_BLOCK_COUNT + 1] =
     [64, 128, 256, 512, 1024];
 pub const CODEC_ENCODER_TRANSFORMER_LAYERS: usize = 4;
 pub const CODEC_ENCODER_TRANSFORMER_CONTEXT: u64 = 16_384;
+pub const CODEC_ENCODER_TRANSFORMER_WINDOW_SIZE: usize = 512;
+pub const CODEC_FRAME_LENGTH: usize = 2048;
 pub const CODEC_ENCODER_TAIL_BLOCK: usize = CODEC_ENCODER_BLOCK_COUNT + 1;
 pub const CODEC_ENCODER_OUTPUT_BLOCK: usize = CODEC_ENCODER_BLOCK_COUNT + 2;
 pub const CODEC_LATENT_DIM: usize = 1024;
@@ -927,6 +929,15 @@ pub struct CodecEncodeStageResult {
     pub hidden: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecEncoderFrontendResult {
+    pub input_samples: u32,
+    pub padded_samples: u32,
+    pub output_frames: u32,
+    pub hidden_dim: usize,
+    pub hidden: Vec<f32>,
+}
+
 pub fn forward_codec_post_module(
     latents: &[f32],
     n_frames: u32,
@@ -994,6 +1005,68 @@ pub fn forward_codec_quantizer_encode_stage(
         output_frames,
         hidden_dim,
         hidden: tokens.into_iter().flatten().collect(),
+    })
+}
+
+pub fn forward_codec_encoder_frontend(
+    audio: &[f32],
+    weights: &CodecEncoderF16Weights,
+) -> Result<CodecEncoderFrontendResult> {
+    let input_samples = u32::try_from(audio.len())
+        .map_err(|_| InferError::Message("encoder input sample count overflows u32".into()))?;
+    let padded_samples = pad_sample_count(audio.len(), CODEC_FRAME_LENGTH)?;
+    let mut current = vec![0.0f32; padded_samples];
+    current[..audio.len()].copy_from_slice(audio);
+
+    current = causal_conv_1d_frame_major(
+        &current,
+        Conv1dFrameMajorSpec {
+            frames: padded_samples,
+            in_ch: 1,
+            out_ch: CODEC_ENCODER_ENTRY_CHANNELS,
+            stride: 1,
+            dilation: 1,
+        },
+        weights.entry_conv_weight.values(),
+        weights.entry_conv_bias.values(),
+    )?;
+    let mut frames = padded_samples;
+    let mut channels = CODEC_ENCODER_ENTRY_CHANNELS;
+
+    for (block, &stride) in weights.blocks.iter().zip(CODEC_ENCODER_RATES.iter()) {
+        current = forward_codec_encoder_block(&current, frames, channels, stride, block)?;
+        frames = encoder_downsample_output_frames(frames, stride)?;
+        channels = encoder_block_output_channels(block.index)?;
+    }
+
+    current = snake_activation_frame_major(
+        &current,
+        frames,
+        channels,
+        weights.tail_snake_alpha.values(),
+    )?;
+    current = causal_conv_1d_frame_major(
+        &current,
+        Conv1dFrameMajorSpec {
+            frames,
+            in_ch: channels,
+            out_ch: CODEC_LATENT_DIM,
+            stride: 1,
+            dilation: 1,
+        },
+        weights.output_conv_weight.values(),
+        weights.output_conv_bias.values(),
+    )?;
+    let output_frames = u32::try_from(frames)
+        .map_err(|_| InferError::Message("encoder output_frames overflows u32".into()))?;
+    let padded_samples_u32 = u32::try_from(padded_samples)
+        .map_err(|_| InferError::Message("encoder padded_samples overflows u32".into()))?;
+    Ok(CodecEncoderFrontendResult {
+        input_samples,
+        padded_samples: padded_samples_u32,
+        output_frames,
+        hidden_dim: CODEC_LATENT_DIM,
+        hidden: current,
     })
 }
 
@@ -1463,6 +1536,98 @@ pub fn decode_waveform_to_wav(
         &waveform.samples,
         waveform.sample_rate,
     ))
+}
+
+fn forward_codec_encoder_block(
+    input: &[f32],
+    frames: usize,
+    channels: usize,
+    stride: usize,
+    weights: &CodecEncoderBlockF16Weights,
+) -> Result<Vec<f32>> {
+    validate_frame_major_len("encoder block input", input, frames, channels)?;
+    let mut x = forward_codec_residual_unit(input, frames, channels, 1, &weights.residual_1)?;
+    x = forward_codec_residual_unit(&x, frames, channels, 3, &weights.residual_2)?;
+    x = forward_codec_residual_unit(&x, frames, channels, 9, &weights.residual_3)?;
+    x = snake_activation_frame_major(&x, frames, channels, weights.snake_alpha.values())?;
+    let out_channels = encoder_block_output_channels(weights.index)?;
+    x = causal_conv_1d_frame_major(
+        &x,
+        Conv1dFrameMajorSpec {
+            frames,
+            in_ch: channels,
+            out_ch: out_channels,
+            stride,
+            dilation: 1,
+        },
+        weights.down_conv_weight.values(),
+        weights.down_conv_bias.values(),
+    )?;
+
+    if weights.transformer_layers.is_empty() {
+        return Ok(x);
+    }
+    let out_frames = encoder_downsample_output_frames(frames, stride)?;
+    let mut tokens = x
+        .chunks_exact(out_channels)
+        .map(|chunk| chunk.to_vec())
+        .collect::<Vec<_>>();
+    for layer in &weights.transformer_layers {
+        tokens = forward_codec_transformer_layer_with_window(
+            &tokens,
+            layer,
+            CODEC_ENCODER_TRANSFORMER_WINDOW_SIZE,
+        )?;
+    }
+    let norm_weight = weights
+        .transformer_norm_weight
+        .as_ref()
+        .ok_or_else(|| InferError::Message("missing encoder transformer norm".into()))?;
+    for token in &mut tokens {
+        *token = rms_norm(token, norm_weight.values(), CODEC_RVQ_NORM_EPS)?;
+    }
+    let hidden = tokens.into_iter().flatten().collect::<Vec<_>>();
+    validate_frame_major_len(
+        "encoder transformer output",
+        &hidden,
+        out_frames,
+        out_channels,
+    )?;
+    Ok(hidden)
+}
+
+fn encoder_downsample_output_frames(frames: usize, stride: usize) -> Result<usize> {
+    if stride == 0 {
+        return Err(InferError::Message(
+            "encoder downsample stride must be non-zero".into(),
+        ));
+    }
+    frames
+        .checked_add(stride - 1)
+        .map(|value| value / stride)
+        .ok_or_else(|| InferError::Message("encoder downsample frame count overflow".into()))
+}
+
+fn encoder_block_output_channels(index: usize) -> Result<usize> {
+    CODEC_ENCODER_CHANNELS
+        .get(index)
+        .copied()
+        .ok_or_else(|| InferError::Message(format!("invalid encoder block index {index}")))
+}
+
+fn pad_sample_count(samples: usize, frame_length: usize) -> Result<usize> {
+    if frame_length == 0 {
+        return Err(InferError::Message(
+            "codec frame_length must be non-zero".into(),
+        ));
+    }
+    if samples == 0 {
+        return Ok(frame_length);
+    }
+    samples
+        .checked_add(frame_length - 1)
+        .map(|value| (value / frame_length) * frame_length)
+        .ok_or_else(|| InferError::Message("codec padded sample count overflow".into()))
 }
 
 pub fn forward_codec_decoder(
@@ -2527,9 +2692,17 @@ fn forward_codec_transformer_layer(
     tokens: &[Vec<f32>],
     weights: &CodecTransformerLayerF16Weights,
 ) -> Result<Vec<Vec<f32>>> {
+    forward_codec_transformer_layer_with_window(tokens, weights, CODEC_RVQ_WINDOW_SIZE)
+}
+
+fn forward_codec_transformer_layer_with_window(
+    tokens: &[Vec<f32>],
+    weights: &CodecTransformerLayerF16Weights,
+    window_size: usize,
+) -> Result<Vec<Vec<f32>>> {
     if tokens.is_empty() {
         return Err(InferError::Message(
-            "codec post_module requires at least one frame".into(),
+            "codec transformer requires at least one frame".into(),
         ));
     }
     let hidden_dim = CODEC_HIDDEN_SIZE as usize;
@@ -2569,7 +2742,7 @@ fn forward_codec_transformer_layer(
 
     let mut attention_outputs = Vec::with_capacity(tokens.len());
     for (offset, token) in tokens.iter().enumerate() {
-        let visible_start = (offset + 1).saturating_sub(CODEC_RVQ_WINDOW_SIZE);
+        let visible_start = (offset + 1).saturating_sub(window_size);
         let visible_count = offset + 1 - visible_start;
         let mut keys = Vec::with_capacity(visible_count * hidden_dim);
         let mut values = Vec::with_capacity(visible_count * hidden_dim);
@@ -3454,6 +3627,26 @@ mod tests {
             weights.output_conv_weight.dimensions(),
             &[3, CODEC_LATENT_DIM, CODEC_LATENT_DIM]
         );
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn runs_encoder_frontend_on_synthetic_pcm_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let weights = CodecEncoderF16Weights::from_gguf(&gguf).expect("encoder f16 weights");
+
+        let audio = (0..CODEC_FRAME_LENGTH)
+            .map(|index| (((index % 97) as f32) - 48.0) / 4096.0)
+            .collect::<Vec<_>>();
+        let result = forward_codec_encoder_frontend(&audio, &weights).expect("encoder frontend");
+        assert_eq!(result.input_samples, CODEC_FRAME_LENGTH as u32);
+        assert_eq!(result.padded_samples, CODEC_FRAME_LENGTH as u32);
+        assert_eq!(result.output_frames, 1);
+        assert_eq!(result.hidden_dim, CODEC_LATENT_DIM);
+        assert_eq!(result.hidden.len(), CODEC_LATENT_DIM);
+        assert!(result.hidden.iter().all(|value| value.is_finite()));
+        assert!(result.hidden.iter().any(|value| value.abs() > 0.0));
     }
 
     #[test]

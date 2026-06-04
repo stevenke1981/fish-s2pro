@@ -20,19 +20,20 @@ pub mod server;
 pub use attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape, SlowArKvCache};
 pub use codec::{
     classify_codec_tensor, decode_waveform, decode_waveform_to_wav, format_codec_dimensions,
-    forward_codec_decoder, forward_codec_post_module, forward_codec_quantizer_encode_stage,
-    forward_codec_upsample, rvq_decode_latents, rvq_lookup_codes, CodecDecodeLatentsResult,
-    CodecDecoderF16Weights, CodecDecoderWeights, CodecDownsampleF16Weights,
-    CodecDownsampleStageF16Weights, CodecDownsampleStageWeights, CodecDownsampleWeights,
-    CodecEncodeStageResult, CodecEncoderBlockF16Weights, CodecEncoderBlockWeights,
-    CodecEncoderF16Weights, CodecEncoderWeights, CodecF16Weights, CodecPostModuleF16Weights,
-    CodecPostModuleResult, CodecPreModuleF16Weights, CodecQuantizerF16Weights,
-    CodecQuantizerWeights, CodecRvqLookupResult, CodecTensorDumpRow, CodecTensorRegistry,
-    CodecTensorRoleInfo, CodecTransformerLayerF16Weights, CodecTransformerLayerWeights,
-    CodecUpsampleF16Weights, CodecUpsampleResult, CodecUpsampleStageF16Weights,
-    CodecUpsampleStageWeights, CodecUpsampleWeights, CodecWaveformResult, CODEC_ARCHITECTURE,
-    CODEC_DECODER_RATES, CODEC_ENCODER_RATES, CODEC_RESIDUAL_QUANTIZERS, CODEC_SAMPLE_RATE,
-    CODEC_TRANSFORMER_LAYERS,
+    forward_codec_decoder, forward_codec_encoder_frontend, forward_codec_post_module,
+    forward_codec_quantizer_encode_stage, forward_codec_upsample, rvq_decode_latents,
+    rvq_lookup_codes, CodecDecodeLatentsResult, CodecDecoderF16Weights, CodecDecoderWeights,
+    CodecDownsampleF16Weights, CodecDownsampleStageF16Weights, CodecDownsampleStageWeights,
+    CodecDownsampleWeights, CodecEncodeStageResult, CodecEncoderBlockF16Weights,
+    CodecEncoderBlockWeights, CodecEncoderF16Weights, CodecEncoderFrontendResult,
+    CodecEncoderWeights, CodecF16Weights, CodecPostModuleF16Weights, CodecPostModuleResult,
+    CodecPreModuleF16Weights, CodecQuantizerF16Weights, CodecQuantizerWeights,
+    CodecRvqLookupResult, CodecTensorDumpRow, CodecTensorRegistry, CodecTensorRoleInfo,
+    CodecTransformerLayerF16Weights, CodecTransformerLayerWeights, CodecUpsampleF16Weights,
+    CodecUpsampleResult, CodecUpsampleStageF16Weights, CodecUpsampleStageWeights,
+    CodecUpsampleWeights, CodecWaveformResult, CODEC_ARCHITECTURE, CODEC_DECODER_RATES,
+    CODEC_ENCODER_RATES, CODEC_ENCODER_TRANSFORMER_WINDOW_SIZE, CODEC_FRAME_LENGTH,
+    CODEC_RESIDUAL_QUANTIZERS, CODEC_SAMPLE_RATE, CODEC_TRANSFORMER_LAYERS,
 };
 pub use engine::{EngineConfig, InferenceEngine, SynthesisRequest};
 pub use error::{InferError, Result};
