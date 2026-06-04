@@ -3,8 +3,9 @@ use std::process::ExitCode;
 
 use fish_s2_parity::{
     compare_fast_ar_frame_dump_files, compare_generated_codes_dump_files,
-    compare_semantic_token_dump_files, compare_slow_ar_dump_files, compare_wav_files,
-    metrics_from_wav_file, ParityError, ParityTolerance, Result, SlowArTensorTolerance,
+    compare_rvq_lookup_dump_files, compare_semantic_token_dump_files, compare_slow_ar_dump_files,
+    compare_wav_files, metrics_from_wav_file, ParityError, ParityTolerance, Result,
+    RvqLookupTolerance, SlowArTensorTolerance,
 };
 
 fn main() -> ExitCode {
@@ -96,6 +97,25 @@ fn run() -> Result<()> {
                 ))
             }
         }
+        Some("compare-rvq-lookup") => {
+            let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let report =
+                compare_rvq_lookup_dump_files(expected, actual, RvqLookupTolerance::default())?;
+            println!("passed={}", report.passed);
+            println!("latent_l2_delta={:.8}", report.l2_delta);
+            println!("latent_mean_abs_delta={:.8}", report.mean_abs_delta);
+            println!("latent_max_abs_delta={:.8}", report.max_abs_delta);
+            println!("latent_first8_mae={:.8}", report.first8_mae);
+            for failure in &report.failures {
+                println!("failure={failure}");
+            }
+            if report.passed {
+                Ok(())
+            } else {
+                Err(ParityError::Message("RVQ lookup parity failed".into()))
+            }
+        }
         Some("compare-slow-ar") => {
             let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
             let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
@@ -126,6 +146,6 @@ fn run() -> Result<()> {
 }
 
 fn usage() -> String {
-    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>\n  fish_s2_parity compare-slow-ar <expected.json> <actual.json>\n  fish_s2_parity compare-semantic-tokens <expected.json> <actual.json>\n  fish_s2_parity compare-fast-ar-frame <expected.json> <actual.json>\n  fish_s2_parity compare-generated-codes <expected.json> <actual.json>"
+    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>\n  fish_s2_parity compare-slow-ar <expected.json> <actual.json>\n  fish_s2_parity compare-semantic-tokens <expected.json> <actual.json>\n  fish_s2_parity compare-fast-ar-frame <expected.json> <actual.json>\n  fish_s2_parity compare-generated-codes <expected.json> <actual.json>\n  fish_s2_parity compare-rvq-lookup <expected.json> <actual.json>"
         .to_string()
 }

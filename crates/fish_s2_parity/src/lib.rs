@@ -246,6 +246,50 @@ pub struct GeneratedCodesParityReport {
     pub failures: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RvqLookupDump {
+    pub backend: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    pub num_codebooks: u32,
+    pub n_frames: u32,
+    pub latent_dim: usize,
+    pub latent_len: usize,
+    pub latent_l2: f64,
+    pub latent_mean_abs: f64,
+    pub latent_max_abs: f64,
+    pub latent_first8: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RvqLookupTolerance {
+    pub max_l2_delta: f64,
+    pub max_mean_abs_delta: f64,
+    pub max_max_abs_delta: f64,
+    pub max_first8_mae: f64,
+}
+
+impl Default for RvqLookupTolerance {
+    fn default() -> Self {
+        Self {
+            max_l2_delta: 5e-4,
+            max_mean_abs_delta: 5e-6,
+            max_max_abs_delta: 5e-5,
+            max_first8_mae: 5e-5,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RvqLookupParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+    pub l2_delta: f64,
+    pub mean_abs_delta: f64,
+    pub max_abs_delta: f64,
+    pub first8_mae: f64,
+}
+
 pub fn semantic_token_dump_from_file(path: impl AsRef<Path>) -> Result<SemanticTokenDump> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
@@ -286,6 +330,21 @@ pub fn compare_generated_codes_dump_files(
     let expected = generated_codes_dump_from_file(expected)?;
     let actual = generated_codes_dump_from_file(actual)?;
     Ok(compare_generated_codes_dumps(&expected, &actual))
+}
+
+pub fn rvq_lookup_dump_from_file(path: impl AsRef<Path>) -> Result<RvqLookupDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_rvq_lookup_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+    tolerance: RvqLookupTolerance,
+) -> Result<RvqLookupParityReport> {
+    let expected = rvq_lookup_dump_from_file(expected)?;
+    let actual = rvq_lookup_dump_from_file(actual)?;
+    Ok(compare_rvq_lookup_dumps(&expected, &actual, tolerance))
 }
 
 pub fn compare_generated_codes_dumps(
@@ -370,6 +429,94 @@ pub fn compare_generated_codes_dumps(
     GeneratedCodesParityReport {
         passed: failures.is_empty(),
         failures,
+    }
+}
+
+pub fn compare_rvq_lookup_dumps(
+    expected: &RvqLookupDump,
+    actual: &RvqLookupDump,
+    tolerance: RvqLookupTolerance,
+) -> RvqLookupParityReport {
+    let mut failures = Vec::new();
+    if expected.text != actual.text {
+        failures.push(format!(
+            "text mismatch: expected {:?}, actual {:?}",
+            expected.text, actual.text
+        ));
+    }
+    let checks = [
+        (
+            "num_codebooks",
+            expected.num_codebooks as usize,
+            actual.num_codebooks as usize,
+        ),
+        (
+            "n_frames",
+            expected.n_frames as usize,
+            actual.n_frames as usize,
+        ),
+        ("latent_dim", expected.latent_dim, actual.latent_dim),
+        ("latent_len", expected.latent_len, actual.latent_len),
+    ];
+    for (name, expected, actual) in checks {
+        if expected != actual {
+            failures.push(format!(
+                "{name} mismatch: expected {expected}, actual {actual}"
+            ));
+        }
+    }
+
+    let expected_len = expected.n_frames as usize * expected.latent_dim;
+    if expected.latent_len != expected_len {
+        failures.push(format!(
+            "expected latent_len {} does not match n_frames*latent_dim {expected_len}",
+            expected.latent_len
+        ));
+    }
+    let actual_len = actual.n_frames as usize * actual.latent_dim;
+    if actual.latent_len != actual_len {
+        failures.push(format!(
+            "actual latent_len {} does not match n_frames*latent_dim {actual_len}",
+            actual.latent_len
+        ));
+    }
+
+    let l2_delta = (expected.latent_l2 - actual.latent_l2).abs();
+    let mean_abs_delta = (expected.latent_mean_abs - actual.latent_mean_abs).abs();
+    let max_abs_delta = (expected.latent_max_abs - actual.latent_max_abs).abs();
+    let first8_mae = first8_mae(&expected.latent_first8, &actual.latent_first8);
+    if l2_delta > tolerance.max_l2_delta {
+        failures.push(format!(
+            "latent_l2 delta {l2_delta:.8} exceeds {:.8}",
+            tolerance.max_l2_delta
+        ));
+    }
+    if mean_abs_delta > tolerance.max_mean_abs_delta {
+        failures.push(format!(
+            "latent_mean_abs delta {mean_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_mean_abs_delta
+        ));
+    }
+    if max_abs_delta > tolerance.max_max_abs_delta {
+        failures.push(format!(
+            "latent_max_abs delta {max_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_max_abs_delta
+        ));
+    }
+    if first8_mae > tolerance.max_first8_mae {
+        failures.push(format!(
+            "latent_first8 MAE {first8_mae:.8} exceeds {:.8}",
+            tolerance.max_first8_mae
+        ));
+    }
+
+    RvqLookupParityReport {
+        passed: failures.is_empty(),
+        failures,
+        l2_delta,
+        mean_abs_delta,
+        max_abs_delta,
+        first8_mae,
     }
 }
 
@@ -1271,6 +1418,48 @@ mod tests {
         };
         let report = compare_generated_codes_dumps(&dump, &dump);
         assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_rvq_lookup_dumps_exact_match() {
+        let dump = RvqLookupDump {
+            backend: "rust".into(),
+            text: Some("hi".into()),
+            num_codebooks: 10,
+            n_frames: 2,
+            latent_dim: 1024,
+            latent_len: 2048,
+            latent_l2: 84.99,
+            latent_mean_abs: 1.48,
+            latent_max_abs: 7.03,
+            latent_first8: vec![0.1, -0.2, 0.3],
+        };
+        let report = compare_rvq_lookup_dumps(&dump, &dump, RvqLookupTolerance::default());
+        assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_rvq_lookup_dumps_reports_stat_delta() {
+        let expected = RvqLookupDump {
+            backend: "s2.cpp".into(),
+            text: Some("hi".into()),
+            num_codebooks: 10,
+            n_frames: 2,
+            latent_dim: 1024,
+            latent_len: 2048,
+            latent_l2: 84.0,
+            latent_mean_abs: 1.0,
+            latent_max_abs: 7.0,
+            latent_first8: vec![0.0; 8],
+        };
+        let mut actual = expected.clone();
+        actual.latent_l2 += 0.01;
+        let report = compare_rvq_lookup_dumps(&expected, &actual, RvqLookupTolerance::default());
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("latent_l2 delta")));
     }
 
     #[test]

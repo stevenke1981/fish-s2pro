@@ -20,6 +20,8 @@ cargo run -q -p fish_s2_infer --bin fish_s2_rvq_lookup_dump -- `
   --codec .\models\s2-pro-f16-codec-only.gguf `
   --codes .\output\generated_codes_hi_rust.json `
   --output .\output\rvq_lookup_hi_rust.json
+
+.\scripts\dump_rvq_lookup_parity.ps1
 ```
 
 ## Codec Metadata
@@ -101,6 +103,7 @@ Completed in Rust:
 - `CodecF16Weights::from_gguf(...)` binds semantic and residual codebook/projection tensors.
 - `rvq_lookup_codes(...)` maps codebook-major generated codes to per-frame 1024-d latents.
 - `fish_s2_rvq_lookup_dump` wrote `output/rvq_lookup_hi_rust.json` from `generated_codes_hi_rust.json`.
+- `scripts/dump_rvq_lookup_parity.ps1` builds an s2.cpp `s2_rvq_lookup_dump` helper that includes `s2_codec.cpp` in the helper translation unit and calls the internal `decode_codes_stage(...)` slice directly.
 
 Observed smoke stats for greedy `hi`, 2 frames:
 
@@ -114,7 +117,16 @@ Observed smoke stats for greedy `hi`, 2 frames:
 | `latent_mean_abs` | 1.4799805433885922 |
 | `latent_max_abs` | 7.035152435302734 |
 
+Observed C++ vs Rust RVQ lookup parity for the same fixture:
+
+| Field | Value |
+|-------|------:|
+| `latent_l2_delta` | 0.00000013 |
+| `latent_mean_abs_delta` | 0.00000000 |
+| `latent_max_abs_delta` | 0.00000000 |
+| `latent_first8_mae` | 0.00000005 |
+
 ## Next Slice
 
-- Dump matching C++ RVQ/codebook lookup stats before porting decoder convolution/transformer math.
-- Then port RVQ pre/post module and decoder path.
+- Port the RVQ post-module transformer + upsample fixture from `decode_codes_stage(...)` output to acoustic latents.
+- Then port the decoder convolution/ConvNeXt path.

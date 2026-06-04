@@ -127,9 +127,9 @@
 - [x] `fish_s2_infer::codec::rvq_lookup_codes(codes, weights) -> CodecRvqLookupResult`
   - First RVQ slice: generated codebook-major codes -> per-frame 1024-d latent via codebook lookup, `out_proj`, bias, and residual sum.
   - Acceptance: `fish_s2_rvq_lookup_dump` reads `output/generated_codes_hi_rust.json` and writes finite stats to `output/rvq_lookup_hi_rust.json` (`2 frames x 1024 latent`).
-- [ ] C++ RVQ lookup parity hook
+- [x] C++ RVQ lookup parity hook
   - Add s2.cpp dump for the same codebook lookup/projection/sum stage before porting pre/post module math.
-  - Acceptance: Rust `rvq_lookup_hi_rust.json` stats/first values match C++ hook within tolerance.
+  - Acceptance: `scripts/dump_rvq_lookup_parity.ps1` builds `s2_rvq_lookup_dump`, compares `decode_codes_stage(...)` vs Rust `rvq_lookup_codes(...)`, and passes on greedy `hi` (`latent_l2_delta=0.00000013`, `latent_first8_mae=0.00000005`).
 - [ ] `fish_s2_infer::codec::rvq_decode_latents(latents) -> acoustic_features`
   - Port RVQ pre/post module and quantizer upsample/downsample path after lookup parity is pinned.
   - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook.
@@ -344,4 +344,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-04 — Codec/RVQ: typed codec F16 weights + RVQ lookup smoke; next: C++ RVQ lookup parity hook*
+*Last updated: 2026-06-04 — Codec/RVQ: C++ RVQ lookup parity hook passes; next: RVQ pre/post module fixture*

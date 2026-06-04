@@ -218,6 +218,6 @@ cargo clippy --all-targets -- -D warnings
 
 Next Phase 4 work:
 
-- Continue codec/RVQ from `docs/S2_PRO_CODEC_REGISTRY.md`: add C++ RVQ lookup parity hook, then RVQ pre/post module fixture.
+- Continue codec/RVQ from `docs/S2_PRO_CODEC_REGISTRY.md`: port RVQ post-module transformer + upsample fixture, then decoder convolution/ConvNeXt path.
 - Add reference-prompt generated-codes parity fixtures.
 - Add typed views for quantized weights needed by non-F16 model variants.
