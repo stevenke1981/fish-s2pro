@@ -15,7 +15,8 @@ param(
     [int] $Threads = 4,
     [string] $BuildType = "Release",
     [switch] $BuildOnly,
-    [switch] $SkipFixtureBuild
+    [switch] $SkipFixtureBuild,
+    [switch] $PromptCodesOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -570,6 +571,9 @@ if (-not $SkipFixtureBuild) {
         New-Item -ItemType Directory -Force -Path (Split-Path $Fixture -Parent) | Out-Null
         Copy-Item -Force -LiteralPath $cppPromptCodes -Destination $Fixture
         Write-Host "wrote reference prompt codes fixture: $Fixture"
+    }
+    if ($PromptCodesOnly) {
+        exit 0
     }
 }
 

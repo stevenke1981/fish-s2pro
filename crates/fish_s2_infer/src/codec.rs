@@ -2254,6 +2254,9 @@ fn causal_conv_1d_frame_major(
         let dst = (frame + left_pad) * in_ch;
         padded[dst..dst + in_ch].copy_from_slice(&input[frame * in_ch..(frame + 1) * in_ch]);
     }
+    for value in &mut padded {
+        *value = round_f32_to_f16(*value);
+    }
 
     let out_frames = padded_frames
         .saturating_sub(kernel_size)
@@ -2280,7 +2283,7 @@ fn causal_conv_1d_frame_major(
                         out_channel,
                     );
                     let input_index = source_frame * in_ch + in_channel;
-                    sum += round_f32_to_f16(padded[input_index]) * weight[weight_index];
+                    sum += padded[input_index] * weight[weight_index];
                 }
             }
             output[out_frame * out_ch + out_channel] = sum;
