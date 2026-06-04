@@ -160,6 +160,7 @@ pub fn resolve_s2_binary(configured: &Path) -> PathBuf {
     configured.to_path_buf()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_start_options(
     binary: PathBuf,
     workdir: PathBuf,

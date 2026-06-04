@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -7,6 +7,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use crate::error::{CoreError, Result};
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
+const GGUF_ALIGNMENT: u64 = 32;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GgufSummary {
@@ -20,8 +21,18 @@ pub struct GgufSummary {
     pub file_size_bytes: u64,
 }
 
-impl GgufSummary {
-    pub fn inspect(path: impl AsRef<Path>) -> Result<Self> {
+#[derive(Debug, Clone)]
+pub struct GgufFile {
+    pub path: String,
+    pub version: u32,
+    pub metadata: Vec<(String, String)>,
+    pub tensors: Vec<GgufTensorInfo>,
+    pub tensor_data_start: u64,
+    pub file_size_bytes: u64,
+}
+
+impl GgufFile {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let file_size_bytes = std::fs::metadata(path).map_err(CoreError::Io)?.len();
         let mut file = File::open(path).map_err(CoreError::Io)?;
@@ -37,12 +48,169 @@ impl GgufSummary {
         let tensor_count = file.read_u64::<LittleEndian>().map_err(CoreError::Io)?;
         let metadata_kv_count = file.read_u64::<LittleEndian>().map_err(CoreError::Io)?;
 
-        let mut metadata = Vec::new();
+        let mut metadata = Vec::with_capacity(metadata_kv_count as usize);
         for _ in 0..metadata_kv_count {
             let key = read_gguf_string(&mut file)?;
             let value = read_gguf_value_as_string(&mut file)?;
             metadata.push((key, value));
         }
+
+        let mut tensors = Vec::with_capacity(tensor_count as usize);
+        for _ in 0..tensor_count {
+            tensors.push(read_tensor_info(&mut file)?);
+        }
+        let tensor_data_start = align_to(file.stream_position().map_err(CoreError::Io)?);
+        validate_tensor_bounds(&tensors, tensor_data_start, file_size_bytes)?;
+
+        Ok(Self {
+            path: path.display().to_string(),
+            version,
+            metadata,
+            tensors,
+            tensor_data_start,
+            file_size_bytes,
+        })
+    }
+
+    pub fn tensor(&self, name: &str) -> Option<&GgufTensorInfo> {
+        self.tensors.iter().find(|tensor| tensor.name == name)
+    }
+
+    pub fn tensor_names(&self) -> impl Iterator<Item = &str> {
+        self.tensors.iter().map(|tensor| tensor.name.as_str())
+    }
+
+    pub fn tensor_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        let tensor = self
+            .tensor(name)
+            .ok_or_else(|| CoreError::Message(format!("tensor not found: {name}")))?;
+        let mut file = File::open(&self.path).map_err(CoreError::Io)?;
+        file.seek(SeekFrom::Start(
+            tensor.absolute_offset(self.tensor_data_start),
+        ))
+        .map_err(CoreError::Io)?;
+        let mut bytes = vec![0u8; tensor.byte_len()?];
+        file.read_exact(&mut bytes).map_err(CoreError::Io)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GgufTensorInfo {
+    pub name: String,
+    pub dimensions: Vec<u64>,
+    pub ggml_type: GgmlType,
+    pub relative_offset: u64,
+}
+
+impl GgufTensorInfo {
+    pub fn element_count(&self) -> Result<u64> {
+        self.dimensions.iter().try_fold(1u64, |acc, dim| {
+            acc.checked_mul(*dim).ok_or_else(|| {
+                CoreError::Message(format!("tensor element count overflow: {}", self.name))
+            })
+        })
+    }
+
+    pub fn byte_len(&self) -> Result<usize> {
+        self.ggml_type.byte_len(self.element_count()?)
+    }
+
+    pub fn absolute_offset(&self, tensor_data_start: u64) -> u64 {
+        tensor_data_start + self.relative_offset
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[repr(u32)]
+pub enum GgmlType {
+    F32 = 0,
+    F16 = 1,
+    Q4_0 = 2,
+    Q4_1 = 3,
+    Q5_0 = 6,
+    Q5_1 = 7,
+    Q8_0 = 8,
+    Q8_1 = 9,
+    Q2K = 10,
+    Q3K = 11,
+    Q4K = 12,
+    Q5K = 13,
+    Q6K = 14,
+    Q8K = 15,
+    I8 = 16,
+    I16 = 17,
+    I32 = 18,
+    I64 = 19,
+    F64 = 20,
+    IQ1S = 21,
+    IQ1M = 22,
+    BF16 = 30,
+}
+
+impl GgmlType {
+    pub fn from_u32(value: u32) -> Result<Self> {
+        match value {
+            0 => Ok(Self::F32),
+            1 => Ok(Self::F16),
+            2 => Ok(Self::Q4_0),
+            3 => Ok(Self::Q4_1),
+            6 => Ok(Self::Q5_0),
+            7 => Ok(Self::Q5_1),
+            8 => Ok(Self::Q8_0),
+            9 => Ok(Self::Q8_1),
+            10 => Ok(Self::Q2K),
+            11 => Ok(Self::Q3K),
+            12 => Ok(Self::Q4K),
+            13 => Ok(Self::Q5K),
+            14 => Ok(Self::Q6K),
+            15 => Ok(Self::Q8K),
+            16 => Ok(Self::I8),
+            17 => Ok(Self::I16),
+            18 => Ok(Self::I32),
+            19 => Ok(Self::I64),
+            20 => Ok(Self::F64),
+            21 => Ok(Self::IQ1S),
+            22 => Ok(Self::IQ1M),
+            30 => Ok(Self::BF16),
+            other => Err(CoreError::Message(format!(
+                "unknown GGML tensor type: {other}"
+            ))),
+        }
+    }
+
+    pub fn byte_len(self, element_count: u64) -> Result<usize> {
+        let bytes = match self {
+            Self::F32 | Self::I32 => element_count.checked_mul(4),
+            Self::F16 | Self::I16 | Self::BF16 => element_count.checked_mul(2),
+            Self::I8 => Some(element_count),
+            Self::I64 | Self::F64 => element_count.checked_mul(8),
+            Self::Q4_0 => block_bytes(element_count, 32, 18),
+            Self::Q4_1 => block_bytes(element_count, 32, 20),
+            Self::Q5_0 => block_bytes(element_count, 32, 22),
+            Self::Q5_1 => block_bytes(element_count, 32, 24),
+            Self::Q8_0 => block_bytes(element_count, 32, 34),
+            Self::Q8_1 => block_bytes(element_count, 32, 40),
+            Self::Q2K => block_bytes(element_count, 256, 84),
+            Self::Q3K => block_bytes(element_count, 256, 110),
+            Self::Q4K => block_bytes(element_count, 256, 144),
+            Self::Q5K => block_bytes(element_count, 256, 176),
+            Self::Q6K => block_bytes(element_count, 256, 210),
+            Self::Q8K => block_bytes(element_count, 256, 292),
+            Self::IQ1S => block_bytes(element_count, 256, 44),
+            Self::IQ1M => block_bytes(element_count, 256, 56),
+        }
+        .ok_or_else(|| CoreError::Message("tensor byte length overflow".into()))?;
+
+        usize::try_from(bytes)
+            .map_err(|_| CoreError::Message("tensor byte length does not fit usize".into()))
+    }
+}
+
+impl GgufSummary {
+    pub fn inspect(path: impl AsRef<Path>) -> Result<Self> {
+        let gguf = GgufFile::open(path)?;
+        let metadata = gguf.metadata;
 
         let architecture = metadata
             .iter()
@@ -58,14 +226,14 @@ impl GgufSummary {
             .and_then(|(_, v)| v.parse().ok());
 
         Ok(Self {
-            path: path.display().to_string(),
-            version,
-            tensor_count,
+            path: gguf.path,
+            version: gguf.version,
+            tensor_count: gguf.tensors.len() as u64,
             metadata,
             architecture,
             kind,
             parameter_count,
-            file_size_bytes,
+            file_size_bytes: gguf.file_size_bytes,
         })
     }
 
@@ -102,6 +270,59 @@ fn read_gguf_string(file: &mut File) -> Result<String> {
     let mut buf = vec![0u8; len as usize];
     file.read_exact(&mut buf).map_err(CoreError::Io)?;
     String::from_utf8(buf).map_err(|e| CoreError::Message(e.to_string()))
+}
+
+fn read_tensor_info(file: &mut File) -> Result<GgufTensorInfo> {
+    let name = read_gguf_string(file)?;
+    let dimension_count = file.read_u32::<LittleEndian>().map_err(CoreError::Io)?;
+    let mut dimensions = Vec::with_capacity(dimension_count as usize);
+    for _ in 0..dimension_count {
+        dimensions.push(file.read_u64::<LittleEndian>().map_err(CoreError::Io)?);
+    }
+    let ggml_type = GgmlType::from_u32(file.read_u32::<LittleEndian>().map_err(CoreError::Io)?)?;
+    let relative_offset = file.read_u64::<LittleEndian>().map_err(CoreError::Io)?;
+    Ok(GgufTensorInfo {
+        name,
+        dimensions,
+        ggml_type,
+        relative_offset,
+    })
+}
+
+fn validate_tensor_bounds(
+    tensors: &[GgufTensorInfo],
+    tensor_data_start: u64,
+    file_size_bytes: u64,
+) -> Result<()> {
+    for tensor in tensors {
+        let byte_len = tensor.byte_len()? as u64;
+        let start = tensor.absolute_offset(tensor_data_start);
+        let end = start.checked_add(byte_len).ok_or_else(|| {
+            CoreError::Message(format!("tensor offset overflow: {}", tensor.name))
+        })?;
+        if end > file_size_bytes {
+            return Err(CoreError::Message(format!(
+                "tensor {} extends past file end: {} > {}",
+                tensor.name, end, file_size_bytes
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn block_bytes(element_count: u64, block_size: u64, bytes_per_block: u64) -> Option<u64> {
+    element_count
+        .checked_add(block_size - 1)?
+        .checked_div(block_size)?
+        .checked_mul(bytes_per_block)
+}
+
+fn align_to(offset: u64) -> u64 {
+    if offset.is_multiple_of(GGUF_ALIGNMENT) {
+        offset
+    } else {
+        offset + (GGUF_ALIGNMENT - (offset % GGUF_ALIGNMENT))
+    }
 }
 
 #[repr(u32)]
@@ -233,6 +454,7 @@ fn read_gguf_value_with_type(file: &mut File, value_type: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn rejects_non_gguf() {
@@ -241,5 +463,104 @@ mod tests {
         let path = dir.join("bad.bin");
         std::fs::write(&path, b"notgguf").unwrap();
         assert!(GgufSummary::inspect(&path).is_err());
+    }
+
+    #[test]
+    fn reads_tensor_directory_and_bytes() {
+        let dir = std::env::temp_dir().join("fish_s2_gguf_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tiny.gguf");
+        write_tiny_gguf(&path);
+
+        let gguf = GgufFile::open(&path).unwrap();
+        assert_eq!(gguf.version, 3);
+        assert_eq!(gguf.tensor_data_start % GGUF_ALIGNMENT, 0);
+        assert_eq!(
+            gguf.tensor_names().collect::<Vec<_>>(),
+            vec!["blk.0.weight"]
+        );
+
+        let tensor = gguf.tensor("blk.0.weight").unwrap();
+        assert_eq!(tensor.dimensions, vec![2, 2]);
+        assert_eq!(tensor.ggml_type, GgmlType::F32);
+        assert_eq!(tensor.relative_offset, 0);
+        assert_eq!(tensor.byte_len().unwrap(), 16);
+
+        let bytes = gguf.tensor_bytes("blk.0.weight").unwrap();
+        let values = bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+
+        let summary = GgufSummary::inspect(&path).unwrap();
+        assert_eq!(summary.tensor_count, 1);
+        assert_eq!(summary.architecture.as_deref(), Some("s2-pro-test"));
+    }
+
+    #[test]
+    #[ignore = "requires local S2 Pro GGUF files in models/"]
+    fn opens_local_s2_pro_model_pair_when_present() {
+        let model_dir = std::env::var("FISH_S2_MODEL_DIR").unwrap_or_else(|_| "models".into());
+        let transformer = find_one(Path::new(&model_dir), "transformer-only.gguf");
+        let codec = find_one(Path::new(&model_dir), "codec-only.gguf");
+
+        for path in [transformer, codec] {
+            let gguf = GgufFile::open(&path).unwrap();
+            assert!(gguf.version >= 2);
+            assert!(!gguf.tensors.is_empty(), "no tensors in {}", path.display());
+            assert!(gguf
+                .metadata
+                .iter()
+                .any(|(key, _)| key == "general.architecture"));
+            let first = gguf.tensors[0].name.clone();
+            assert!(
+                !gguf.tensor_bytes(&first).unwrap().is_empty(),
+                "empty first tensor bytes in {}",
+                path.display()
+            );
+        }
+    }
+
+    fn write_tiny_gguf(path: &Path) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(GGUF_MAGIC);
+        bytes.extend_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        write_string(&mut bytes, "general.architecture");
+        bytes.extend_from_slice(&(GgufValueType::String as u32).to_le_bytes());
+        write_string(&mut bytes, "s2-pro-test");
+        write_string(&mut bytes, "blk.0.weight");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u64.to_le_bytes());
+        bytes.extend_from_slice(&2_u64.to_le_bytes());
+        bytes.extend_from_slice(&(GgmlType::F32 as u32).to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        let aligned = align_to(bytes.len() as u64) as usize;
+        bytes.resize(aligned, 0);
+        for value in [1.0_f32, 2.0, 3.0, 4.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut file = File::create(path).unwrap();
+        file.write_all(&bytes).unwrap();
+    }
+
+    fn write_string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    fn find_one(root: &Path, suffix: &str) -> std::path::PathBuf {
+        std::fs::read_dir(root)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", root.display()))
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(suffix))
+            })
+            .unwrap_or_else(|| panic!("missing *{suffix} in {}", root.display()))
     }
 }

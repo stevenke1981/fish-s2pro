@@ -449,19 +449,17 @@ impl FishS2App {
                     self.status_line = "請提供有效的 WAV 與參考文本".to_string();
                 }
             }
-            if ui.button("套用到伺服器工作目錄").clicked() {
-                if self.clone_ref_wav.exists() {
-                    if copy_reference_files(
-                        &self.config.server_workdir,
-                        &self.clone_ref_wav,
-                        &self.clone_ref_text,
-                    )
-                    .is_ok()
-                    {
-                        self.status_line =
-                            "已寫入 reference 檔案。若伺服器正在運行，請重新啟動。".to_string();
-                    }
-                }
+            if ui.button("套用到伺服器工作目錄").clicked()
+                && self.clone_ref_wav.exists()
+                && copy_reference_files(
+                    &self.config.server_workdir,
+                    &self.clone_ref_wav,
+                    &self.clone_ref_text,
+                )
+                .is_ok()
+            {
+                self.status_line =
+                    "已寫入 reference 檔案。若伺服器正在運行，請重新啟動。".to_string();
             }
         });
 
@@ -668,7 +666,7 @@ impl FishS2App {
             python_exe: self.config.python_exe.clone(),
             script_path: resolve_export_script(&self.config.convert_script),
         };
-        ui.monospace(&plan.command_preview());
+        ui.monospace(plan.command_preview());
 
         if ui
             .add_enabled(!self.busy, egui::Button::new("開始轉換"))

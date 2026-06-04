@@ -69,7 +69,7 @@ impl ScannedModels {
             let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
                 continue;
             };
-            if ext.to_ascii_lowercase() != "gguf" {
+            if !ext.eq_ignore_ascii_case("gguf") {
                 continue;
             }
             let file_name = path
