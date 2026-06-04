@@ -32,8 +32,8 @@ pub use codec::{
     CodecTransformerLayerF16Weights, CodecTransformerLayerWeights, CodecUpsampleF16Weights,
     CodecUpsampleResult, CodecUpsampleStageF16Weights, CodecUpsampleStageWeights,
     CodecUpsampleWeights, CodecWaveformResult, CODEC_ARCHITECTURE, CODEC_DECODER_RATES,
-    CODEC_ENCODER_RATES, CODEC_ENCODER_TRANSFORMER_WINDOW_SIZE, CODEC_FRAME_LENGTH,
-    CODEC_RESIDUAL_QUANTIZERS, CODEC_SAMPLE_RATE, CODEC_TRANSFORMER_LAYERS,
+    CODEC_ENCODER_KERNELS, CODEC_ENCODER_RATES, CODEC_ENCODER_TRANSFORMER_WINDOW_SIZE,
+    CODEC_FRAME_LENGTH, CODEC_RESIDUAL_QUANTIZERS, CODEC_SAMPLE_RATE, CODEC_TRANSFORMER_LAYERS,
 };
 pub use engine::{EngineConfig, InferenceEngine, SynthesisRequest};
 pub use error::{InferError, Result};

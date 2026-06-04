@@ -35,7 +35,8 @@ pub const CODEC_CONVNEXT_EXPANDED_SIZE: usize = 4096;
 pub const CODEC_CONVNEXT_NORM_EPS: f32 = 1e-6;
 pub const CODEC_ENCODER_BLOCK_COUNT: usize = 4;
 pub const CODEC_ENCODER_ENTRY_CHANNELS: usize = 64;
-pub const CODEC_ENCODER_RATES: [usize; CODEC_ENCODER_BLOCK_COUNT] = [4, 8, 16, 16];
+pub const CODEC_ENCODER_RATES: [usize; CODEC_ENCODER_BLOCK_COUNT] = [2, 4, 8, 8];
+pub const CODEC_ENCODER_KERNELS: [usize; CODEC_ENCODER_BLOCK_COUNT] = [4, 8, 16, 16];
 pub const CODEC_ENCODER_CHANNELS: [usize; CODEC_ENCODER_BLOCK_COUNT + 1] =
     [64, 128, 256, 512, 1024];
 pub const CODEC_ENCODER_TRANSFORMER_LAYERS: usize = 4;
@@ -2386,7 +2387,7 @@ fn validate_encoder_block(
         tensors,
         &block.down_conv_weight,
         &[
-            CODEC_ENCODER_RATES[index - 1] as u64,
+            CODEC_ENCODER_KERNELS[index - 1] as u64,
             in_channels,
             out_channels,
         ],
@@ -3250,7 +3251,7 @@ fn validate_encoder_block_f16_dims(
     validate_f16_dims(
         block.down_conv_weight.name(),
         block.down_conv_weight.dimensions(),
-        &[CODEC_ENCODER_RATES[index - 1], in_channels, out_channels],
+        &[CODEC_ENCODER_KERNELS[index - 1], in_channels, out_channels],
     )?;
     validate_f16_dims(
         block.down_conv_bias.name(),
@@ -3642,9 +3643,9 @@ mod tests {
         let result = forward_codec_encoder_frontend(&audio, &weights).expect("encoder frontend");
         assert_eq!(result.input_samples, CODEC_FRAME_LENGTH as u32);
         assert_eq!(result.padded_samples, CODEC_FRAME_LENGTH as u32);
-        assert_eq!(result.output_frames, 1);
+        assert_eq!(result.output_frames, 4);
         assert_eq!(result.hidden_dim, CODEC_LATENT_DIM);
-        assert_eq!(result.hidden.len(), CODEC_LATENT_DIM);
+        assert_eq!(result.hidden.len(), 4 * CODEC_LATENT_DIM);
         assert!(result.hidden.iter().all(|value| value.is_finite()));
         assert!(result.hidden.iter().any(|value| value.abs() > 0.0));
     }

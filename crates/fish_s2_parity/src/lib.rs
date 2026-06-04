@@ -385,6 +385,49 @@ pub struct DecodeStageParityReport {
     pub first8_mae: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct EncoderStageDump {
+    pub backend: String,
+    pub input_samples: u32,
+    pub padded_samples: u32,
+    pub output_frames: u32,
+    pub hidden_dim: usize,
+    pub hidden_len: usize,
+    pub hidden_l2: f64,
+    pub hidden_mean_abs: f64,
+    pub hidden_max_abs: f64,
+    pub hidden_first8: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EncoderStageTolerance {
+    pub max_l2_delta: f64,
+    pub max_mean_abs_delta: f64,
+    pub max_max_abs_delta: f64,
+    pub max_first8_mae: f64,
+}
+
+impl Default for EncoderStageTolerance {
+    fn default() -> Self {
+        Self {
+            max_l2_delta: 5e-3,
+            max_mean_abs_delta: 5e-5,
+            max_max_abs_delta: 3e-3,
+            max_first8_mae: 2e-3,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EncoderStageParityReport {
+    pub passed: bool,
+    pub failures: Vec<String>,
+    pub l2_delta: f64,
+    pub mean_abs_delta: f64,
+    pub max_abs_delta: f64,
+    pub first8_mae: f64,
+}
+
 pub fn semantic_token_dump_from_file(path: impl AsRef<Path>) -> Result<SemanticTokenDump> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
@@ -470,6 +513,21 @@ pub fn compare_decode_stage_dump_files(
     let expected = decode_stage_dump_from_file(expected)?;
     let actual = decode_stage_dump_from_file(actual)?;
     Ok(compare_decode_stage_dumps(&expected, &actual, tolerance))
+}
+
+pub fn encoder_stage_dump_from_file(path: impl AsRef<Path>) -> Result<EncoderStageDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_encoder_stage_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+    tolerance: EncoderStageTolerance,
+) -> Result<EncoderStageParityReport> {
+    let expected = encoder_stage_dump_from_file(expected)?;
+    let actual = encoder_stage_dump_from_file(actual)?;
+    Ok(compare_encoder_stage_dumps(&expected, &actual, tolerance))
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -975,6 +1033,93 @@ pub fn compare_decode_stage_dumps(
     }
 
     DecodeStageParityReport {
+        passed: failures.is_empty(),
+        failures,
+        l2_delta,
+        mean_abs_delta,
+        max_abs_delta,
+        first8_mae,
+    }
+}
+
+pub fn compare_encoder_stage_dumps(
+    expected: &EncoderStageDump,
+    actual: &EncoderStageDump,
+    tolerance: EncoderStageTolerance,
+) -> EncoderStageParityReport {
+    let mut failures = Vec::new();
+    let checks = [
+        (
+            "input_samples",
+            expected.input_samples as usize,
+            actual.input_samples as usize,
+        ),
+        (
+            "padded_samples",
+            expected.padded_samples as usize,
+            actual.padded_samples as usize,
+        ),
+        (
+            "output_frames",
+            expected.output_frames as usize,
+            actual.output_frames as usize,
+        ),
+        ("hidden_dim", expected.hidden_dim, actual.hidden_dim),
+        ("hidden_len", expected.hidden_len, actual.hidden_len),
+    ];
+    for (name, expected, actual) in checks {
+        if expected != actual {
+            failures.push(format!(
+                "{name} mismatch: expected {expected}, actual {actual}"
+            ));
+        }
+    }
+
+    let expected_len = expected.output_frames as usize * expected.hidden_dim;
+    if expected.hidden_len != expected_len {
+        failures.push(format!(
+            "expected hidden_len {} does not match output_frames*hidden_dim {expected_len}",
+            expected.hidden_len
+        ));
+    }
+    let actual_len = actual.output_frames as usize * actual.hidden_dim;
+    if actual.hidden_len != actual_len {
+        failures.push(format!(
+            "actual hidden_len {} does not match output_frames*hidden_dim {actual_len}",
+            actual.hidden_len
+        ));
+    }
+
+    let l2_delta = (expected.hidden_l2 - actual.hidden_l2).abs();
+    let mean_abs_delta = (expected.hidden_mean_abs - actual.hidden_mean_abs).abs();
+    let max_abs_delta = (expected.hidden_max_abs - actual.hidden_max_abs).abs();
+    let first8_mae = first8_mae(&expected.hidden_first8, &actual.hidden_first8);
+    if l2_delta > tolerance.max_l2_delta {
+        failures.push(format!(
+            "hidden_l2 delta {l2_delta:.8} exceeds {:.8}",
+            tolerance.max_l2_delta
+        ));
+    }
+    if mean_abs_delta > tolerance.max_mean_abs_delta {
+        failures.push(format!(
+            "hidden_mean_abs delta {mean_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_mean_abs_delta
+        ));
+    }
+    if max_abs_delta > tolerance.max_max_abs_delta {
+        failures.push(format!(
+            "hidden_max_abs delta {max_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_max_abs_delta
+        ));
+    }
+    if first8_mae > tolerance.max_first8_mae {
+        failures.push(format!(
+            "hidden_first8 MAE {first8_mae:.8} exceeds {:.8}",
+            tolerance.max_first8_mae
+        ));
+    }
+
+    EncoderStageParityReport {
         passed: failures.is_empty(),
         failures,
         l2_delta,
@@ -2008,6 +2153,49 @@ mod tests {
         actual.hidden_l2 += 0.01;
         let report =
             compare_decode_stage_dumps(&expected, &actual, DecodeStageTolerance::default());
+        assert!(!report.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("hidden_l2 delta")));
+    }
+
+    #[test]
+    fn compare_encoder_stage_dumps_exact_match() {
+        let dump = EncoderStageDump {
+            backend: "rust".into(),
+            input_samples: 2048,
+            padded_samples: 2048,
+            output_frames: 1,
+            hidden_dim: 1024,
+            hidden_len: 1024,
+            hidden_l2: 42.0,
+            hidden_mean_abs: 0.2,
+            hidden_max_abs: 6.0,
+            hidden_first8: vec![0.1, -0.2],
+        };
+        let report = compare_encoder_stage_dumps(&dump, &dump, EncoderStageTolerance::default());
+        assert!(report.passed, "{report:#?}");
+    }
+
+    #[test]
+    fn compare_encoder_stage_dumps_reports_stat_delta() {
+        let expected = EncoderStageDump {
+            backend: "s2.cpp".into(),
+            input_samples: 2048,
+            padded_samples: 2048,
+            output_frames: 1,
+            hidden_dim: 1024,
+            hidden_len: 1024,
+            hidden_l2: 42.0,
+            hidden_mean_abs: 0.2,
+            hidden_max_abs: 6.0,
+            hidden_first8: vec![0.0; 8],
+        };
+        let mut actual = expected.clone();
+        actual.hidden_l2 += 0.01;
+        let report =
+            compare_encoder_stage_dumps(&expected, &actual, EncoderStageTolerance::default());
         assert!(!report.passed);
         assert!(report
             .failures

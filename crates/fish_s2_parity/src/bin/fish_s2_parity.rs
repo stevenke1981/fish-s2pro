@@ -2,12 +2,13 @@ use std::env;
 use std::process::ExitCode;
 
 use fish_s2_parity::{
-    compare_decode_stage_dump_files, compare_fast_ar_frame_dump_files,
-    compare_generated_codes_dump_files, compare_post_module_dump_files,
-    compare_rvq_lookup_dump_files, compare_semantic_token_dump_files, compare_slow_ar_dump_files,
-    compare_wav_files, compare_waveform_dump_files, metrics_from_wav_file, DecodeStageTolerance,
-    ParityError, ParityTolerance, PostModuleTolerance, Result, RvqLookupTolerance,
-    SlowArTensorTolerance, WaveformTolerance,
+    compare_decode_stage_dump_files, compare_encoder_stage_dump_files,
+    compare_fast_ar_frame_dump_files, compare_generated_codes_dump_files,
+    compare_post_module_dump_files, compare_rvq_lookup_dump_files,
+    compare_semantic_token_dump_files, compare_slow_ar_dump_files, compare_wav_files,
+    compare_waveform_dump_files, metrics_from_wav_file, DecodeStageTolerance,
+    EncoderStageTolerance, ParityError, ParityTolerance, PostModuleTolerance, Result,
+    RvqLookupTolerance, SlowArTensorTolerance, WaveformTolerance,
 };
 
 fn main() -> ExitCode {
@@ -156,6 +157,28 @@ fn run() -> Result<()> {
                 Err(ParityError::Message("decode-stage parity failed".into()))
             }
         }
+        Some("compare-encoder-stage") => {
+            let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let report = compare_encoder_stage_dump_files(
+                expected,
+                actual,
+                EncoderStageTolerance::default(),
+            )?;
+            println!("passed={}", report.passed);
+            println!("hidden_l2_delta={:.8}", report.l2_delta);
+            println!("hidden_mean_abs_delta={:.8}", report.mean_abs_delta);
+            println!("hidden_max_abs_delta={:.8}", report.max_abs_delta);
+            println!("hidden_first8_mae={:.8}", report.first8_mae);
+            for failure in &report.failures {
+                println!("failure={failure}");
+            }
+            if report.passed {
+                Ok(())
+            } else {
+                Err(ParityError::Message("encoder-stage parity failed".into()))
+            }
+        }
         Some("compare-waveform") => {
             let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
             let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
@@ -205,6 +228,6 @@ fn run() -> Result<()> {
 }
 
 fn usage() -> String {
-    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>\n  fish_s2_parity compare-slow-ar <expected.json> <actual.json>\n  fish_s2_parity compare-semantic-tokens <expected.json> <actual.json>\n  fish_s2_parity compare-fast-ar-frame <expected.json> <actual.json>\n  fish_s2_parity compare-generated-codes <expected.json> <actual.json>\n  fish_s2_parity compare-rvq-lookup <expected.json> <actual.json>\n  fish_s2_parity compare-post-module <expected.json> <actual.json>\n  fish_s2_parity compare-decode-stage <expected.json> <actual.json>\n  fish_s2_parity compare-waveform <expected.json> <actual.json>"
+    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>\n  fish_s2_parity compare-slow-ar <expected.json> <actual.json>\n  fish_s2_parity compare-semantic-tokens <expected.json> <actual.json>\n  fish_s2_parity compare-fast-ar-frame <expected.json> <actual.json>\n  fish_s2_parity compare-generated-codes <expected.json> <actual.json>\n  fish_s2_parity compare-rvq-lookup <expected.json> <actual.json>\n  fish_s2_parity compare-post-module <expected.json> <actual.json>\n  fish_s2_parity compare-decode-stage <expected.json> <actual.json>\n  fish_s2_parity compare-encoder-stage <expected.json> <actual.json>\n  fish_s2_parity compare-waveform <expected.json> <actual.json>"
         .to_string()
 }
