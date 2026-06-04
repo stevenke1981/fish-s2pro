@@ -1,6 +1,9 @@
+use fish_s2_core::gguf::GgufFile;
+
 use crate::attention::{apply_rope_normal, SlowArKvCache};
 use crate::error::{InferError, Result};
-use crate::tensor::{linear, rms_norm};
+use crate::registry::{ArGraphSpec, TransformerTensorRegistry};
+use crate::tensor::{linear, rms_norm, F16TensorView};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlowArLayerShape {
@@ -13,6 +16,17 @@ pub struct SlowArLayerShape {
 }
 
 impl SlowArLayerShape {
+    pub fn from_ar_graph_spec(spec: &ArGraphSpec) -> Result<Self> {
+        Ok(Self {
+            hidden_size: usize_from_u32(spec.embedding_length, "hidden_size")?,
+            head_count: usize_from_u32(spec.head_count, "head_count")?,
+            head_count_kv: usize_from_u32(spec.head_count_kv, "head_count_kv")?,
+            head_dim: usize_from_u32(spec.head_dim, "head_dim")?,
+            rope_base: spec.rope_freq_base,
+            rms_norm_eps: spec.rms_norm_eps,
+        })
+    }
+
     pub fn q_size(self) -> Result<usize> {
         checked_mul(self.head_count, self.head_dim, "q_size")
     }
@@ -64,6 +78,69 @@ impl SlowArLayerShape {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowArLayerF16Weights {
+    pub attention_norm: F16TensorView,
+    pub q_norm: F16TensorView,
+    pub k_norm: F16TensorView,
+    pub wqkv: F16TensorView,
+    pub output: F16TensorView,
+}
+
+impl SlowArLayerF16Weights {
+    pub fn from_gguf_layer(
+        gguf: &GgufFile,
+        registry: &TransformerTensorRegistry,
+        layer: usize,
+    ) -> Result<Self> {
+        let names = registry
+            .slow_layer(layer)
+            .ok_or_else(|| InferError::Message(format!("slow layer not found: {layer}")))?;
+        let shape = SlowArLayerShape::from_ar_graph_spec(&registry.graph_spec().slow)?;
+        let weights = Self {
+            attention_norm: F16TensorView::from_gguf(gguf, &names.attention_norm)?,
+            q_norm: F16TensorView::from_gguf(gguf, &names.attention_q_norm)?,
+            k_norm: F16TensorView::from_gguf(gguf, &names.attention_k_norm)?,
+            wqkv: F16TensorView::from_gguf(gguf, &names.attention_wqkv)?,
+            output: F16TensorView::from_gguf(gguf, &names.attention_output)?,
+        };
+        weights.validate_dimensions(shape)?;
+        Ok(weights)
+    }
+
+    pub fn skeleton(&self, shape: SlowArLayerShape) -> SlowArLayerSkeleton<'_> {
+        SlowArLayerSkeleton {
+            shape,
+            attention_norm_weight: self.attention_norm.values(),
+            q_norm_weight: self.q_norm.values(),
+            k_norm_weight: self.k_norm.values(),
+            wqkv_weight: self.wqkv.values(),
+            output_weight: self.output.values(),
+        }
+    }
+
+    fn validate_dimensions(&self, shape: SlowArLayerShape) -> Result<()> {
+        expect_dims(
+            "attention_norm",
+            self.attention_norm.dimensions(),
+            &[shape.hidden_size],
+        )?;
+        expect_dims("q_norm", self.q_norm.dimensions(), &[shape.head_dim])?;
+        expect_dims("k_norm", self.k_norm.dimensions(), &[shape.head_dim])?;
+        expect_dims(
+            "wqkv",
+            self.wqkv.dimensions(),
+            &[shape.hidden_size, shape.wqkv_out()?],
+        )?;
+        expect_dims(
+            "attention_output",
+            self.output.dimensions(),
+            &[shape.q_size()?, shape.hidden_size],
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SlowArLayerSkeleton<'a> {
     pub shape: SlowArLayerShape,
@@ -107,8 +184,18 @@ impl SlowArLayerSkeleton<'_> {
         let (query_raw, rest) = qkv.split_at(q_size);
         let (key_raw, value_raw) = rest.split_at(kv_size);
 
-        let mut query = rms_norm_heads(query_raw, self.q_norm_weight, self.shape.head_dim)?;
-        let mut key = rms_norm_heads(key_raw, self.k_norm_weight, self.shape.head_dim)?;
+        let mut query = rms_norm_heads(
+            query_raw,
+            self.q_norm_weight,
+            self.shape.head_dim,
+            self.shape.rms_norm_eps,
+        )?;
+        let mut key = rms_norm_heads(
+            key_raw,
+            self.k_norm_weight,
+            self.shape.head_dim,
+            self.shape.rms_norm_eps,
+        )?;
         let value = value_raw.to_vec();
 
         apply_rope_normal(
@@ -187,7 +274,7 @@ impl SlowArLayerSkeleton<'_> {
     }
 }
 
-fn rms_norm_heads(input: &[f32], weight: &[f32], head_dim: usize) -> Result<Vec<f32>> {
+fn rms_norm_heads(input: &[f32], weight: &[f32], head_dim: usize, eps: f32) -> Result<Vec<f32>> {
     if !input.len().is_multiple_of(head_dim) {
         return Err(InferError::Message(format!(
             "head RMSNorm input length {} is not a multiple of head_dim {head_dim}",
@@ -196,9 +283,20 @@ fn rms_norm_heads(input: &[f32], weight: &[f32], head_dim: usize) -> Result<Vec<
     }
     let mut output = Vec::with_capacity(input.len());
     for head in input.chunks_exact(head_dim) {
-        output.extend(rms_norm(head, weight, 0.0)?);
+        output.extend(rms_norm(head, weight, eps)?);
     }
     Ok(output)
+}
+
+fn expect_dims(name: &str, actual: &[usize], expected: &[usize]) -> Result<()> {
+    if actual != expected {
+        Err(InferError::Message(format!(
+            "{name} dimensions mismatch: expected {:?}, got {:?}",
+            expected, actual
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn expect_len(name: &str, values: &[f32], expected: usize) -> Result<()> {
@@ -217,8 +315,14 @@ fn checked_mul(a: usize, b: usize, name: &str) -> Result<usize> {
         .ok_or_else(|| InferError::Message(format!("{name} overflow")))
 }
 
+fn usize_from_u32(value: u32, name: &str) -> Result<usize> {
+    usize::try_from(value).map_err(|_| InferError::Message(format!("{name} overflows usize")))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::registry::KvCacheSpec;
     use fish_s2_core::gguf::GgmlType;
@@ -319,6 +423,45 @@ mod tests {
         assert!(err.contains("wqkv_weight length mismatch"));
     }
 
+    #[test]
+    #[ignore = "requires local s2-pro transformer GGUF in models/"]
+    fn binds_local_layer0_f16_weights_and_runs_single_token_fixture() {
+        let path = local_model_dir().join("s2-pro-f16-transformer-only.gguf");
+        let gguf = GgufFile::open(path).unwrap();
+        let registry = TransformerTensorRegistry::from_gguf(&gguf).unwrap();
+        let graph = registry.graph_spec();
+        let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow).unwrap();
+        let weights = SlowArLayerF16Weights::from_gguf_layer(&gguf, &registry, 0).unwrap();
+
+        let mut hidden = vec![0.0f32; shape.hidden_size];
+        hidden[0] = 1.0;
+        hidden[1] = -0.5;
+        hidden[shape.hidden_size - 1] = 0.25;
+        let mut cache = SlowArKvCache::new(graph.kv_cache, 1).unwrap();
+
+        let actual = weights
+            .skeleton(shape)
+            .forward_decode_token(&hidden, &mut cache, 0, 0)
+            .unwrap();
+
+        assert_eq!(actual.normalized.len(), shape.hidden_size);
+        assert_eq!(actual.query.len(), shape.q_size().unwrap());
+        assert_eq!(actual.key.len(), shape.kv_size().unwrap());
+        assert_eq!(actual.value.len(), shape.kv_size().unwrap());
+        assert_eq!(actual.attention.len(), shape.q_size().unwrap());
+        assert_eq!(actual.projected.len(), shape.hidden_size);
+        assert_eq!(actual.hidden.len(), shape.hidden_size);
+        assert!(all_finite(&actual.normalized));
+        assert!(all_finite(&actual.query));
+        assert!(all_finite(&actual.key));
+        assert!(all_finite(&actual.value));
+        assert!(all_finite(&actual.attention));
+        assert!(all_finite(&actual.projected));
+        assert!(all_finite(&actual.hidden));
+        assert_close(cache.key_token(0, 0).unwrap(), &actual.key);
+        assert_close(cache.value_token(0, 0).unwrap(), &actual.value);
+    }
+
     fn row_major_weight(input_dim: usize, output_dim: usize, rows: &[Vec<f32>]) -> Vec<f32> {
         assert_eq!(rows.len(), input_dim);
         let mut values = Vec::with_capacity(input_dim * output_dim);
@@ -337,5 +480,22 @@ mod tests {
                 "expected {expected}, got {actual}"
             );
         }
+    }
+
+    fn all_finite(values: &[f32]) -> bool {
+        values.iter().all(|value| value.is_finite())
+    }
+
+    fn local_model_dir() -> std::path::PathBuf {
+        std::env::var("FISH_S2_MODEL_DIR").map_or_else(
+            |_| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .nth(2)
+                    .expect("workspace root")
+                    .join("models")
+            },
+            std::path::PathBuf::from,
+        )
     }
 }

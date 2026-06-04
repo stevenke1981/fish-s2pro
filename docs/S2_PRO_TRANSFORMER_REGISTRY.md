@@ -111,6 +111,10 @@ Phase 4.2 prep slice:
   decode layer through attention RMSNorm, WQKV split, QK norm, RoPE, KV write,
   GQA attention, output projection, and residual add. This is a CPU shape/math
   smoke, not full model-weight prefill/decode yet.
+- `fish_s2_infer::slow_ar::SlowArLayerF16Weights` binds a registry layer to
+  real local GGUF F16 tensors (`attention_norm`, `q_norm`, `k_norm`, `wqkv`,
+  `wo`) and feeds them into the single-token skeleton. The ignored fixture loads
+  layer 0 and checks shape consistency plus finite outputs.
 
 Root tensor specs:
 
@@ -155,6 +159,7 @@ Validation:
 cargo test --workspace
 cargo test -p fish_s2_infer attention::tests
 cargo test -p fish_s2_infer slow_ar::tests
+cargo test -p fish_s2_infer slow_ar::tests::binds_local_layer0_f16_weights_and_runs_single_token_fixture -- --ignored
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo clippy --all-targets -- -D warnings
@@ -163,5 +168,5 @@ cargo clippy --all-targets -- -D warnings
 Next Phase 4 work:
 
 - Add typed views for quantized weights needed by non-F16 model variants.
-- Bind `SlowArLayerSkeleton` to real registry/GGUF F16 tensors for a tiny local
-  forward fixture, then add C++ dump parity.
+- Add C++ dump parity for the layer 0 single-token fixture, then broaden from
+  decode-only token to prefill over multiple tokens.
