@@ -80,6 +80,8 @@ function Write-EncodePromptCodesMain {
 
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <stdexcept>
 #include <string>
 
 using json = nlohmann::json;
@@ -90,6 +92,7 @@ struct Args {
     std::string codec;
     std::string wav;
     std::string prompt_text;
+    std::string prompt_text_file;
     std::string output;
     int threads = 4;
 };
@@ -97,7 +100,24 @@ struct Args {
 void print_help() {
     std::cerr
         << "Usage: s2_encode_prompt_codes_dump --codec <codec.gguf> --wav <ref.wav> "
-           "--prompt-text <text> --output <prompt_codes.json> [--threads 4]\n";
+           "(--prompt-text <text> | --prompt-text-file <text.txt>) "
+           "--output <prompt_codes.json> [--threads 4]\n";
+}
+
+std::string read_trimmed_text_file(const std::string & path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error("failed to open prompt text file: " + path);
+    }
+    std::string text(
+        (std::istreambuf_iterator<char>(in)),
+        std::istreambuf_iterator<char>());
+    while (!text.empty()) {
+        const char tail = text.back();
+        if (tail != '\r' && tail != '\n' && tail != '\t' && tail != ' ') break;
+        text.pop_back();
+    }
+    return text;
 }
 
 bool parse_args(int argc, char ** argv, Args & args) {
@@ -122,6 +142,10 @@ bool parse_args(int argc, char ** argv, Args & args) {
             const char * v = need_value("--prompt-text");
             if (!v) return false;
             args.prompt_text = v;
+        } else if (arg == "--prompt-text-file") {
+            const char * v = need_value("--prompt-text-file");
+            if (!v) return false;
+            args.prompt_text_file = v;
         } else if (arg == "--output") {
             const char * v = need_value("--output");
             if (!v) return false;
@@ -138,7 +162,13 @@ bool parse_args(int argc, char ** argv, Args & args) {
             return false;
         }
     }
-    return !args.codec.empty() && !args.wav.empty() && !args.prompt_text.empty() && !args.output.empty();
+    if (!args.prompt_text.empty() && !args.prompt_text_file.empty()) {
+        std::cerr << "--prompt-text and --prompt-text-file are mutually exclusive\n";
+        return false;
+    }
+    return !args.codec.empty() && !args.wav.empty()
+        && (!args.prompt_text.empty() || !args.prompt_text_file.empty())
+        && !args.output.empty();
 }
 
 } // namespace
@@ -171,7 +201,9 @@ int main(int argc, char ** argv) {
     }
 
     json doc;
-    doc["prompt_text"] = args.prompt_text;
+    const std::string prompt_text =
+        args.prompt_text_file.empty() ? args.prompt_text : read_trimmed_text_file(args.prompt_text_file);
+    doc["prompt_text"] = prompt_text;
     doc["num_codebooks"] = codec.num_codebooks();
     doc["cols"] = n_frames;
     doc["codes"] = codes;
@@ -510,7 +542,6 @@ if (-not $SkipFixtureBuild) {
         -MainCpp "encode_prompt_codes_dump_main.cpp" `
         -ExtraSources @("src/s2_audio.cpp") `
         -BuildType $BuildType
-    $promptText = (Read-Utf8 $PromptTextFile).Trim()
     $tinyWav = Join-Path $DumpDir "reference_tiny.wav"
     Write-TinyReferenceWav -Path $tinyWav
     $cppPromptCodes = Join-Path $outDir "reference_prompt_codes_cpp.json"
@@ -518,7 +549,7 @@ if (-not $SkipFixtureBuild) {
     & $encodeExe `
         --codec $Codec `
         --wav $tinyWav `
-        --prompt-text $promptText `
+        --prompt-text-file $PromptTextFile `
         --output $cppPromptCodes `
         --threads $Threads
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -526,7 +557,7 @@ if (-not $SkipFixtureBuild) {
         cargo run -q -p fish_s2_infer --bin fish_s2_reference_codes_dump -- `
             --codec $Codec `
             --wav-input $tinyWav `
-            --prompt-text $promptText `
+            --prompt-text-file $PromptTextFile `
             --prompt-codes-format `
             --output $rustPromptCodes
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

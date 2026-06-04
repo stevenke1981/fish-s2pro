@@ -40,9 +40,7 @@ fn main() -> fish_s2_infer::Result<()> {
     let num_codebooks = result.num_codebooks;
     let n_frames = result.quantizer_frames;
     if args.prompt_codes_format {
-        let prompt_text = args.prompt_text.ok_or_else(|| {
-            InferError::Message("--prompt-codes-format requires --prompt-text".into())
-        })?;
+        let prompt_text = args.prompt_text()?;
         let dump = PromptCodesDump::from_result(prompt_text, result);
         write_json(&args.output, &dump)?;
     } else {
@@ -92,6 +90,7 @@ struct Args {
     wav_input: Option<PathBuf>,
     samples: usize,
     prompt_text: Option<String>,
+    prompt_text_file: Option<PathBuf>,
     prompt_codes_format: bool,
 }
 
@@ -104,6 +103,7 @@ impl Args {
         let mut wav_input = None;
         let mut samples = CODEC_FRAME_LENGTH;
         let mut prompt_text = None;
+        let mut prompt_text_file = None;
         let mut prompt_codes_format = false;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -120,6 +120,11 @@ impl Args {
                     })?;
                 }
                 "--prompt-text" => prompt_text = Some(args.next().ok_or_missing("--prompt-text")?),
+                "--prompt-text-file" => {
+                    prompt_text_file = Some(PathBuf::from(
+                        args.next().ok_or_missing("--prompt-text-file")?,
+                    ))
+                }
                 "--prompt-codes-format" => prompt_codes_format = true,
                 "--help" | "-h" => {
                     print_usage();
@@ -134,8 +139,22 @@ impl Args {
             wav_input,
             samples,
             prompt_text,
+            prompt_text_file,
             prompt_codes_format,
         })
+    }
+
+    fn prompt_text(&self) -> fish_s2_infer::Result<String> {
+        match (&self.prompt_text, &self.prompt_text_file) {
+            (Some(_), Some(_)) => Err(InferError::Message(
+                "--prompt-text and --prompt-text-file are mutually exclusive".into(),
+            )),
+            (Some(text), None) => Ok(text.clone()),
+            (None, Some(path)) => Ok(std::fs::read_to_string(path)?.trim().to_string()),
+            (None, None) => Err(InferError::Message(
+                "--prompt-codes-format requires --prompt-text or --prompt-text-file".into(),
+            )),
+        }
     }
 }
 
@@ -169,6 +188,7 @@ fn write_json<T: serde::Serialize>(path: &Path, dump: &T) -> fish_s2_infer::Resu
 fn print_usage() {
     eprintln!(
         "Usage: fish_s2_reference_codes_dump [--codec codec.gguf] [--wav-input reference.wav] \
-         [--samples N] [--prompt-text text] [--prompt-codes-format] [--output reference_codes.json]"
+         [--samples N] [--prompt-text text | --prompt-text-file text.txt] \
+         [--prompt-codes-format] [--output reference_codes.json]"
     );
 }

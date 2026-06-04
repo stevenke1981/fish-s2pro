@@ -164,6 +164,7 @@
     - `fish_s2_reference_codes_dump` writes codebook-major JSON for synthetic PCM or `--wav-input`.
   - [x] Add reference prompt-code parity harness.
     - `fish_s2_reference_codes_dump --prompt-codes-format`, `fish_s2_parity compare-prompt-codes`, and `dump_reference_generated_codes_parity.ps1` now produce/compare Rust vs s2.cpp prompt-code fixtures.
+    - Current parity blocker: the harness runs with UTF-8 prompt text via file path, but exact codes still differ on the tiny reference WAV because encoder-stage parity already fails there (`hidden_l2_delta≈0.97`, `hidden_mean_abs_delta≈0.0067`).
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency
@@ -370,4 +371,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: reference prompt-code parity harness wired; next: run/debug exact s2.cpp prompt-code parity*
+*Last updated: 2026-06-05 — Codec/RVQ: prompt-code harness runs; next: debug tiny-WAV encoder-stage parity before exact prompt-code parity*

@@ -2152,18 +2152,29 @@ impl CodecQuantizerF16Weights {
             )));
         }
 
+        let projected_norm = projected
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .max(1e-12)
+            .sqrt();
         let mut best_code = 0usize;
-        let mut best_distance = f32::INFINITY;
+        let mut best_score = f32::NEG_INFINITY;
         for code in 0..codebook_size {
             let row = &codebook[code * projection_dim..(code + 1) * projection_dim];
-            let mut distance = 0.0f32;
+            let row_norm = row
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .max(1e-12)
+                .sqrt();
+            let mut score = 0.0f32;
             for (actual, candidate) in projected.iter().zip(row) {
-                let delta = actual - candidate;
-                distance += delta * delta;
+                score += (actual / projected_norm) * (candidate / row_norm);
             }
-            if distance < best_distance {
+            if score > best_score {
                 best_code = code;
-                best_distance = distance;
+                best_score = score;
             }
         }
 
