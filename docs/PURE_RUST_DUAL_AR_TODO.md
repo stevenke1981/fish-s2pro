@@ -157,7 +157,8 @@
     - [x] Port encoder frontend forward math shape path (`forward_codec_encoder_frontend` synthetic PCM GGUF smoke).
     - [x] Add C++ encoder-latent parity hook (`scripts/dump_encoder_stage_parity.ps1`) and fix encoder stride metadata (`rates=[2,4,8,8]`, kernels `[4,8,16,16]`).
     - [x] Add reference WAV loader path for encoder-latent parity (`-WavInput output\waveform_hi_rust.wav` passes).
-  - [ ] Port VQ nearest-code search for semantic + 9 residual codebooks.
+  - [x] Port VQ nearest-code search for semantic + 9 residual codebooks.
+    - Added `rvq_encode_latents_nearest`: in_proj -> nearest codebook row -> out_proj reconstruction -> residual update, with ignored GGUF smoke.
   - Acceptance: reference WAV prompt codes match s2.cpp within exact code sequence or documented tolerance.
 
 ### Package E — Quantization and Memory Efficiency
@@ -364,4 +365,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: synthetic + WAV encoder-latent parity passes; next: VQ nearest-code search*
+*Last updated: 2026-06-05 — Codec/RVQ: VQ nearest-code search implemented with ignored GGUF smoke; next: full reference WAV prompt-code parity*

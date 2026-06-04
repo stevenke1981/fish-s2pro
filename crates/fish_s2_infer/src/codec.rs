@@ -2056,6 +2056,60 @@ impl CodecQuantizerF16Weights {
         add_bias(&mut projected, self.out_proj_bias.values())?;
         Ok(projected)
     }
+
+    fn nearest_code_for_residual(
+        &self,
+        residual: &[f32],
+        codebook_size: usize,
+    ) -> Result<CodecNearestCodeResult> {
+        let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+        let projection_dim = CODEC_PROJECTION_DIM as usize;
+        if residual.len() != hidden_dim {
+            return Err(InferError::Message(format!(
+                "codec VQ residual length mismatch: expected {hidden_dim}, got {}",
+                residual.len()
+            )));
+        }
+        let mut projected = linear(
+            residual,
+            self.in_proj_weight.values(),
+            hidden_dim,
+            projection_dim,
+        )?;
+        add_bias(&mut projected, self.in_proj_bias.values())?;
+
+        let codebook = self.codebook_weight.values();
+        let expected_codebook_len = projection_dim
+            .checked_mul(codebook_size)
+            .ok_or_else(|| InferError::Message("codec codebook length overflow".into()))?;
+        if codebook.len() != expected_codebook_len {
+            return Err(InferError::Message(format!(
+                "codec codebook length mismatch: expected {expected_codebook_len}, got {}",
+                codebook.len()
+            )));
+        }
+
+        let mut best_code = 0usize;
+        let mut best_distance = f32::INFINITY;
+        for code in 0..codebook_size {
+            let row = &codebook[code * projection_dim..(code + 1) * projection_dim];
+            let mut distance = 0.0f32;
+            for (actual, candidate) in projected.iter().zip(row) {
+                let delta = actual - candidate;
+                distance += delta * delta;
+            }
+            if distance < best_distance {
+                best_code = code;
+                best_distance = distance;
+            }
+        }
+
+        let reconstructed = self.project_code(best_code as u32, codebook_size)?;
+        Ok(CodecNearestCodeResult {
+            code: best_code as u32,
+            reconstructed,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2064,6 +2118,21 @@ pub struct CodecRvqLookupResult {
     pub n_frames: u32,
     pub latent_dim: usize,
     pub latents: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecVqEncodeResult {
+    pub num_codebooks: u32,
+    pub n_frames: u32,
+    pub latent_dim: usize,
+    pub codes: Vec<i32>,
+    pub final_residual_l2: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CodecNearestCodeResult {
+    code: u32,
+    reconstructed: Vec<f32>,
 }
 
 pub fn rvq_lookup_codes(
@@ -2125,6 +2194,69 @@ pub fn rvq_lookup_codes(
         n_frames,
         latent_dim,
         latents,
+    })
+}
+
+pub fn rvq_encode_latents_nearest(
+    latents: &[f32],
+    n_frames: u32,
+    weights: &CodecF16Weights,
+) -> Result<CodecVqEncodeResult> {
+    let num_codebooks = 1usize
+        .checked_add(weights.residual_quantizers.len())
+        .ok_or_else(|| InferError::Message("codec codebook count overflow".into()))?;
+    let n_frames_usize = usize::try_from(n_frames)
+        .map_err(|_| InferError::Message("n_frames overflows usize".into()))?;
+    let latent_dim = CODEC_HIDDEN_SIZE as usize;
+    validate_frame_major_len("codec VQ encode input", latents, n_frames_usize, latent_dim)?;
+
+    let codes_len = num_codebooks
+        .checked_mul(n_frames_usize)
+        .ok_or_else(|| InferError::Message("codec VQ codes length overflow".into()))?;
+    let mut codes = vec![0i32; codes_len];
+    let mut final_residual_l2 = Vec::with_capacity(n_frames_usize);
+
+    for frame in 0..n_frames_usize {
+        let start = frame * latent_dim;
+        let mut residual = latents[start..start + latent_dim].to_vec();
+
+        for codebook in 0..num_codebooks {
+            let (quantizer, codebook_size) = if codebook == 0 {
+                (
+                    &weights.semantic_quantizer,
+                    CODEC_SEMANTIC_CODEBOOK_SIZE as usize,
+                )
+            } else {
+                (
+                    &weights.residual_quantizers[codebook - 1],
+                    CODEC_RESIDUAL_CODEBOOK_SIZE as usize,
+                )
+            };
+            let nearest = quantizer.nearest_code_for_residual(&residual, codebook_size)?;
+            codes[codebook * n_frames_usize + frame] = i32::try_from(nearest.code)
+                .map_err(|_| InferError::Message("codec VQ code overflows i32".into()))?;
+            for (slot, reconstructed) in residual.iter_mut().zip(nearest.reconstructed) {
+                *slot -= reconstructed;
+            }
+        }
+
+        final_residual_l2.push(
+            residual
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt(),
+        );
+    }
+
+    let num_codebooks = u32::try_from(num_codebooks)
+        .map_err(|_| InferError::Message("codec codebook count overflows u32".into()))?;
+    Ok(CodecVqEncodeResult {
+        num_codebooks,
+        n_frames,
+        latent_dim,
+        codes,
+        final_residual_l2,
     })
 }
 
@@ -3590,6 +3722,68 @@ mod tests {
         assert_eq!(result.hidden.len(), 2 * hidden_dim);
         assert!(result.hidden.iter().all(|value| value.is_finite()));
         assert!(result.hidden.iter().any(|value| value.abs() > 0.0));
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn runs_vq_nearest_search_on_synthetic_encode_stage_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let registry = CodecTensorRegistry::from_gguf(&gguf).expect("codec registry");
+        let downsample_weights = CodecDownsampleF16Weights::from_gguf_registry(&gguf, &registry)
+            .expect("downsample f16 weights");
+        let pre_weights = CodecPreModuleF16Weights::from_gguf_registry(&gguf, &registry)
+            .expect("pre module f16 weights");
+        let rvq_weights = CodecF16Weights::from_gguf(&gguf).expect("codec f16 weights");
+
+        let input_frames = 8u32;
+        let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+        let latents = (0..input_frames as usize * hidden_dim)
+            .map(|index| ((index % 127) as f32 - 63.0) / 768.0)
+            .collect::<Vec<_>>();
+        let stage = forward_codec_quantizer_encode_stage(
+            &latents,
+            input_frames,
+            &downsample_weights,
+            &pre_weights,
+        )
+        .expect("quantizer encode stage");
+        let result = rvq_encode_latents_nearest(&stage.hidden, stage.output_frames, &rvq_weights)
+            .expect("VQ nearest encode");
+
+        assert_eq!(result.num_codebooks, 1 + CODEC_RESIDUAL_QUANTIZERS as u32);
+        assert_eq!(result.n_frames, stage.output_frames);
+        assert_eq!(result.latent_dim, hidden_dim);
+        assert_eq!(
+            result.codes.len(),
+            result.num_codebooks as usize * result.n_frames as usize
+        );
+        assert!(result
+            .final_residual_l2
+            .iter()
+            .all(|value| value.is_finite()));
+
+        for frame in 0..result.n_frames as usize {
+            let semantic = result.codes[frame];
+            assert!(semantic >= 0);
+            assert!(semantic < CODEC_SEMANTIC_CODEBOOK_SIZE as i32);
+            for codebook in 1..result.num_codebooks as usize {
+                let code = result.codes[codebook * result.n_frames as usize + frame];
+                assert!(code >= 0);
+                assert!(code < CODEC_RESIDUAL_CODEBOOK_SIZE as i32);
+            }
+        }
+
+        let decoded = rvq_lookup_codes(
+            &result.codes,
+            result.num_codebooks,
+            result.n_frames,
+            &rvq_weights,
+        )
+        .expect("encoded codes lookup");
+        assert_eq!(decoded.latent_dim, hidden_dim);
+        assert_eq!(decoded.latents.len(), stage.hidden.len());
+        assert!(decoded.latents.iter().all(|value| value.is_finite()));
     }
 
     #[test]
