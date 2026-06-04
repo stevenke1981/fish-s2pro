@@ -89,6 +89,18 @@ pub struct SlowArDump {
     #[serde(default)]
     pub hidden: Option<TensorStats>,
     #[serde(default)]
+    pub ffn_normalized: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_gate: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_up: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_activated: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_projected: Option<TensorStats>,
+    #[serde(default)]
+    pub block_hidden: Option<TensorStats>,
+    #[serde(default)]
     pub sequence: Vec<SlowArTokenDump>,
 }
 
@@ -102,6 +114,18 @@ pub struct SlowArTokenDump {
     pub attention: TensorStats,
     pub projected: TensorStats,
     pub hidden: TensorStats,
+    #[serde(default)]
+    pub ffn_normalized: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_gate: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_up: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_activated: Option<TensorStats>,
+    #[serde(default)]
+    pub ffn_projected: Option<TensorStats>,
+    #[serde(default)]
+    pub block_hidden: Option<TensorStats>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -209,6 +233,37 @@ pub fn compare_slow_ar_dumps(
             );
             tensor_deltas.push(delta);
         }
+        let optional_pairs = [
+            (
+                "ffn_normalized",
+                &expected.ffn_normalized,
+                &actual.ffn_normalized,
+            ),
+            ("ffn_gate", &expected.ffn_gate, &actual.ffn_gate),
+            ("ffn_up", &expected.ffn_up, &actual.ffn_up),
+            (
+                "ffn_activated",
+                &expected.ffn_activated,
+                &actual.ffn_activated,
+            ),
+            (
+                "ffn_projected",
+                &expected.ffn_projected,
+                &actual.ffn_projected,
+            ),
+            ("block_hidden", &expected.block_hidden, &actual.block_hidden),
+        ];
+        for (name, expected, actual) in optional_pairs {
+            if let Some(delta) = compare_optional_tensor_stats(
+                format!("token{token_index}.{name}"),
+                expected,
+                actual,
+                tolerance,
+                &mut failures,
+            ) {
+                tensor_deltas.push(delta);
+            }
+        }
     }
 
     SlowArParityReport {
@@ -260,6 +315,12 @@ fn normalized_slow_ar_tokens(
             attention: attention.clone(),
             projected: projected.clone(),
             hidden: hidden.clone(),
+            ffn_normalized: dump.ffn_normalized.clone(),
+            ffn_gate: dump.ffn_gate.clone(),
+            ffn_up: dump.ffn_up.clone(),
+            ffn_activated: dump.ffn_activated.clone(),
+            ffn_projected: dump.ffn_projected.clone(),
+            block_hidden: dump.block_hidden.clone(),
         }],
         _ => {
             failures.push(format!(
@@ -339,6 +400,29 @@ fn compare_tensor_stats(
         mean_abs_delta,
         max_abs_delta,
         first8_mae,
+    }
+}
+
+fn compare_optional_tensor_stats(
+    name: String,
+    expected: &Option<TensorStats>,
+    actual: &Option<TensorStats>,
+    tolerance: SlowArTensorTolerance,
+    failures: &mut Vec<String>,
+) -> Option<SlowArTensorDelta> {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) => Some(compare_tensor_stats(
+            name, expected, actual, tolerance, failures,
+        )),
+        (None, None) => None,
+        (Some(_), None) => {
+            failures.push(format!("{name} missing from actual dump"));
+            None
+        }
+        (None, Some(_)) => {
+            failures.push(format!("{name} missing from expected dump"));
+            None
+        }
     }
 }
 
@@ -653,6 +737,21 @@ mod tests {
     }
 
     #[test]
+    fn compares_slow_ar_full_block_dumps() {
+        let expected: SlowArDump =
+            serde_json::from_str(test_slow_ar_full_block_dump_json()).unwrap();
+        let mut actual = expected.clone();
+        actual.block_hidden.as_mut().unwrap().l2 += 0.1;
+        let report = compare_slow_ar_dumps(&expected, &actual, SlowArTensorTolerance::default());
+        assert!(!report.passed);
+        assert_eq!(report.tensor_deltas.len(), 13);
+        assert!(report
+            .failures
+            .iter()
+            .any(|f| f.contains("token0.block_hidden.l2")));
+    }
+
+    #[test]
     #[ignore = "requires FISH_S2_PARITY=1 plus golden/candidate WAV paths"]
     fn compares_env_candidate_to_golden() {
         if std::env::var("FISH_S2_PARITY").ok().as_deref() != Some("1") {
@@ -747,6 +846,32 @@ mod tests {
               "hidden": {"len": 4, "l2": 6.1, "mean_abs": 2.5, "max_abs": 6.0, "first8": [4.0, 6.0, 0.1, 0.0]}
             }
           ]
+        }"#
+    }
+
+    fn test_slow_ar_full_block_dump_json() -> &'static str {
+        r#"{
+          "transformer": "model.gguf",
+          "layer": 0,
+          "position": 0,
+          "token_count": 1,
+          "hidden_size": 4,
+          "head_count": 2,
+          "head_count_kv": 1,
+          "head_dim": 2,
+          "normalized": {"len": 4, "l2": 1.0, "mean_abs": 0.25, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 0.0]},
+          "query": {"len": 4, "l2": 2.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 1.0]},
+          "key": {"len": 2, "l2": 1.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0]},
+          "value": {"len": 2, "l2": 3.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0]},
+          "attention": {"len": 4, "l2": 4.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0, 3.0, 0.0]},
+          "projected": {"len": 4, "l2": 5.0, "mean_abs": 2.25, "max_abs": 6.0, "first8": [3.0, 6.0, 0.0, 0.0]},
+          "hidden": {"len": 4, "l2": 6.0, "mean_abs": 2.5, "max_abs": 6.0, "first8": [4.0, 6.0, 0.0, 0.0]},
+          "ffn_normalized": {"len": 4, "l2": 1.0, "mean_abs": 0.25, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 0.0]},
+          "ffn_gate": {"len": 2, "l2": 2.0, "mean_abs": 1.0, "max_abs": 2.0, "first8": [2.0, 0.0]},
+          "ffn_up": {"len": 2, "l2": 3.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0]},
+          "ffn_activated": {"len": 2, "l2": 4.0, "mean_abs": 2.0, "max_abs": 4.0, "first8": [4.0, 0.0]},
+          "ffn_projected": {"len": 4, "l2": 5.0, "mean_abs": 1.25, "max_abs": 5.0, "first8": [5.0, 0.0, 0.0, 0.0]},
+          "block_hidden": {"len": 4, "l2": 6.0, "mean_abs": 2.25, "max_abs": 9.0, "first8": [9.0, 6.0, 0.0, 0.0]}
         }"#
     }
 }

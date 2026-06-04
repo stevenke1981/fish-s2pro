@@ -325,6 +325,7 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
 
     const int32_t q_size   = n_head * head_dim;
     const int32_t kv_size  = n_head_kv * head_dim;
+    const int32_t ffn_size = hparams_.feed_forward_length;
     const float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     const int32_t n_tokens = token_count;
 
@@ -413,6 +414,12 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
                                       ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, q_size, n_tokens));
     ggml_tensor * projected = mul_mat_checked(ctx0, layer.wo, attn_cur, "mul_mat:dump_wo");
     ggml_tensor * hidden_out = ggml_add(ctx0, hidden_input, projected);
+    ggml_tensor * ffn_in = rms_norm_weighted(ctx0, hidden_out, layer.ffn_norm, hparams_.rms_norm_eps);
+    ggml_tensor * ffn_gate = mul_mat_checked(ctx0, layer.w1, ffn_in, "mul_mat:dump_w1");
+    ggml_tensor * ffn_up = mul_mat_checked(ctx0, layer.w3, ffn_in, "mul_mat:dump_w3");
+    ggml_tensor * ffn_activated = ggml_swiglu_split(ctx0, ffn_gate, ffn_up);
+    ggml_tensor * ffn_projected = mul_mat_checked(ctx0, layer.w2, ffn_activated, "mul_mat:dump_w2");
+    ggml_tensor * block_hidden = ggml_add(ctx0, hidden_out, ffn_projected);
 
     // gallocr may reuse intermediate buffers. Copy every tensor we want to dump
     // into dedicated graph outputs so host reads are stable after compute.
@@ -430,6 +437,18 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
         ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
     ggml_tensor * dump_hidden = ggml_cpy(ctx0, hidden_out,
         ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+    ggml_tensor * dump_ffn_normalized = ggml_cpy(ctx0, ffn_in,
+        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+    ggml_tensor * dump_ffn_gate = ggml_cpy(ctx0, ffn_gate,
+        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
+    ggml_tensor * dump_ffn_up = ggml_cpy(ctx0, ffn_up,
+        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
+    ggml_tensor * dump_ffn_activated = ggml_cpy(ctx0, ffn_activated,
+        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ffn_size, n_tokens));
+    ggml_tensor * dump_ffn_projected = ggml_cpy(ctx0, ffn_projected,
+        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
+    ggml_tensor * dump_block_hidden = ggml_cpy(ctx0, block_hidden,
+        ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, dim, n_tokens));
 
     ggml_build_forward_expand(gf, dump_normalized);
     ggml_build_forward_expand(gf, dump_query);
@@ -438,6 +457,12 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     ggml_build_forward_expand(gf, dump_attention);
     ggml_build_forward_expand(gf, dump_projected);
     ggml_build_forward_expand(gf, dump_hidden);
+    ggml_build_forward_expand(gf, dump_ffn_normalized);
+    ggml_build_forward_expand(gf, dump_ffn_gate);
+    ggml_build_forward_expand(gf, dump_ffn_up);
+    ggml_build_forward_expand(gf, dump_ffn_activated);
+    ggml_build_forward_expand(gf, dump_ffn_projected);
+    ggml_build_forward_expand(gf, dump_block_hidden);
 
     if (!ggml_gallocr_alloc_graph(allocr_, gf)) {
         std::fprintf(stderr, "[dump] gallocr alloc failed\n");
@@ -489,13 +514,25 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
     const std::vector<float> attention_values = tensor_to_f32_s2_dump(dump_attention);
     const std::vector<float> projected_values = tensor_to_f32_s2_dump(dump_projected);
     const std::vector<float> hidden_out_values = tensor_to_f32_s2_dump(dump_hidden);
+    const std::vector<float> ffn_normalized_values = tensor_to_f32_s2_dump(dump_ffn_normalized);
+    const std::vector<float> ffn_gate_values = tensor_to_f32_s2_dump(dump_ffn_gate);
+    const std::vector<float> ffn_up_values = tensor_to_f32_s2_dump(dump_ffn_up);
+    const std::vector<float> ffn_activated_values = tensor_to_f32_s2_dump(dump_ffn_activated);
+    const std::vector<float> ffn_projected_values = tensor_to_f32_s2_dump(dump_ffn_projected);
+    const std::vector<float> block_hidden_values = tensor_to_f32_s2_dump(dump_block_hidden);
     write_tensor_stats_values_s2_dump(out, "  ", "normalized", token_slice_s2_dump(normalized_values, 0, dim), true);
     write_tensor_stats_values_s2_dump(out, "  ", "query", token_slice_s2_dump(query_values, 0, q_size), true);
     write_tensor_stats_values_s2_dump(out, "  ", "key", token_slice_s2_dump(key_values, 0, kv_size), true);
     write_tensor_stats_values_s2_dump(out, "  ", "value", token_slice_s2_dump(value_values, 0, kv_size), true);
     write_tensor_stats_values_s2_dump(out, "  ", "attention", token_slice_s2_dump(attention_values, 0, q_size), true);
     write_tensor_stats_values_s2_dump(out, "  ", "projected", token_slice_s2_dump(projected_values, 0, dim), true);
-    write_tensor_stats_values_s2_dump(out, "  ", "hidden", token_slice_s2_dump(hidden_out_values, 0, dim), n_tokens > 1);
+    write_tensor_stats_values_s2_dump(out, "  ", "hidden", token_slice_s2_dump(hidden_out_values, 0, dim), true);
+    write_tensor_stats_values_s2_dump(out, "  ", "ffn_normalized", token_slice_s2_dump(ffn_normalized_values, 0, dim), true);
+    write_tensor_stats_values_s2_dump(out, "  ", "ffn_gate", token_slice_s2_dump(ffn_gate_values, 0, ffn_size), true);
+    write_tensor_stats_values_s2_dump(out, "  ", "ffn_up", token_slice_s2_dump(ffn_up_values, 0, ffn_size), true);
+    write_tensor_stats_values_s2_dump(out, "  ", "ffn_activated", token_slice_s2_dump(ffn_activated_values, 0, ffn_size), true);
+    write_tensor_stats_values_s2_dump(out, "  ", "ffn_projected", token_slice_s2_dump(ffn_projected_values, 0, dim), true);
+    write_tensor_stats_values_s2_dump(out, "  ", "block_hidden", token_slice_s2_dump(block_hidden_values, 0, dim), n_tokens > 1);
     if (n_tokens > 1) {
         out << "  \"sequence\": [\n";
         for (int32_t token = 0; token < n_tokens; ++token) {
@@ -507,7 +544,13 @@ bool SlowARModel::dump_slow_ar_layer_stats(const std::string & transformer_path_
             write_tensor_stats_values_s2_dump(out, "      ", "value", token_slice_s2_dump(value_values, token, kv_size), true);
             write_tensor_stats_values_s2_dump(out, "      ", "attention", token_slice_s2_dump(attention_values, token, q_size), true);
             write_tensor_stats_values_s2_dump(out, "      ", "projected", token_slice_s2_dump(projected_values, token, dim), true);
-            write_tensor_stats_values_s2_dump(out, "      ", "hidden", token_slice_s2_dump(hidden_out_values, token, dim), false);
+            write_tensor_stats_values_s2_dump(out, "      ", "hidden", token_slice_s2_dump(hidden_out_values, token, dim), true);
+            write_tensor_stats_values_s2_dump(out, "      ", "ffn_normalized", token_slice_s2_dump(ffn_normalized_values, token, dim), true);
+            write_tensor_stats_values_s2_dump(out, "      ", "ffn_gate", token_slice_s2_dump(ffn_gate_values, token, ffn_size), true);
+            write_tensor_stats_values_s2_dump(out, "      ", "ffn_up", token_slice_s2_dump(ffn_up_values, token, ffn_size), true);
+            write_tensor_stats_values_s2_dump(out, "      ", "ffn_activated", token_slice_s2_dump(ffn_activated_values, token, ffn_size), true);
+            write_tensor_stats_values_s2_dump(out, "      ", "ffn_projected", token_slice_s2_dump(ffn_projected_values, token, dim), true);
+            write_tensor_stats_values_s2_dump(out, "      ", "block_hidden", token_slice_s2_dump(block_hidden_values, token, dim), false);
             out << "    }";
             if (token + 1 < n_tokens) out << ",";
             out << "\n";

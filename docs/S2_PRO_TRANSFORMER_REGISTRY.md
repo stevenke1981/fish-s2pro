@@ -119,8 +119,7 @@ Phase 4.2 prep slice:
 - `SlowArLayerSkeleton::forward_block_prefill_sequence` adds the transformer FFN
   sublayer on top of the attention output: `ffn_norm -> w1/w3 -> SwiGLU -> w2
   -> residual`. This is covered by toy block smoke tests and the ignored local
-  GGUF layer 0 finite smoke, but the C++ JSON dump still covers attention stats
-  only.
+  GGUF layer 0 finite smoke.
 - `fish_s2_infer::slow_ar::SlowArLayerF16Weights` binds a registry layer to
   real local GGUF F16 tensors (`attention_norm`, `q_norm`, `k_norm`, `wqkv`,
   `wo`, `ffn_norm`, `w1`, `w2`, `w3`) and feeds them into the layer skeleton.
@@ -128,18 +127,20 @@ Phase 4.2 prep slice:
   attention and FFN outputs.
 - `fish_s2_slow_ar_dump` writes JSON stats for the same layer 0 Rust fixture,
   including len/L2/mean_abs/max_abs/first8 for normalized, Q, K, V, attention,
-  projection, and final hidden state. `--tokens N` uses the prefill-style
-  sequence path and emits a `sequence` array with per-token positions while
-  keeping token 0 stats at the top level for backward compatibility.
+  projection, attention residual hidden, FFN normalized/gate/up/SwiGLU/projected,
+  and final block hidden state. `--tokens N` uses the prefill-style sequence path
+  and emits a `sequence` array with per-token positions while keeping token 0
+  stats at the top level for backward compatibility.
 - `scripts\dump_s2cpp_slow_ar_stats.ps1` patches a local ignored s2.cpp clone,
   builds a standalone `s2_slow_ar_dump` helper without the Crow/server target,
-  and writes the matching layer-local C++ JSON stats dump. `-Tokens N` mirrors
-  the Rust sequence fixture. It defaults to CPU and also supports CUDA via
+  and writes the matching layer-local full-block C++ JSON stats dump. `-Tokens N`
+  mirrors the Rust sequence fixture. It defaults to CPU and also supports CUDA via
   `-Cuda -CudaDevice 0`; on Visual Studio 18/2026 with CUDA 12.6, add
   `-AllowUnsupportedCudaCompiler`.
 - `fish_s2_parity compare-slow-ar` compares Rust and C++ Slow-AR JSON stats
-  dumps with per-token tensor names such as `token1.key`. Tolerances are tuned
-  for ggml F16/RoPE vs Rust scalar `f32` drift across a two-token decode.
+  dumps with per-token tensor names such as `token1.key` and
+  `token1.ffn_projected`. Tolerances are tuned for ggml F16/RoPE vs Rust scalar
+  `f32` drift across a two-token decode.
 
 Root tensor specs:
 

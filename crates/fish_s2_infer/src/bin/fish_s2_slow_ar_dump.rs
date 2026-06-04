@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use fish_s2_core::gguf::GgufFile;
 use fish_s2_infer::{
-    SlowArKvCache, SlowArLayerF16Weights, SlowArLayerForwardOutput, SlowArLayerShape,
+    SlowArKvCache, SlowArLayerBlockOutput, SlowArLayerF16Weights, SlowArLayerShape,
     TransformerTensorRegistry,
 };
 
@@ -23,6 +23,12 @@ struct Dump {
     attention: TensorStats,
     projected: TensorStats,
     hidden: TensorStats,
+    ffn_normalized: TensorStats,
+    ffn_gate: TensorStats,
+    ffn_up: TensorStats,
+    ffn_activated: TensorStats,
+    ffn_projected: TensorStats,
+    block_hidden: TensorStats,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     sequence: Vec<TokenDump>,
 }
@@ -37,6 +43,12 @@ struct TokenDump {
     attention: TensorStats,
     projected: TensorStats,
     hidden: TensorStats,
+    ffn_normalized: TensorStats,
+    ffn_gate: TensorStats,
+    ffn_up: TensorStats,
+    ffn_activated: TensorStats,
+    ffn_projected: TensorStats,
+    block_hidden: TensorStats,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -61,7 +73,7 @@ fn main() -> fish_s2_infer::Result<()> {
         .map(|index| hidden_fixture(shape.hidden_size, index))
         .collect::<Vec<_>>();
     let mut cache = SlowArKvCache::new(graph.kv_cache, args.position + args.tokens)?;
-    let outputs = weights.skeleton(shape).forward_prefill_sequence(
+    let outputs = weights.skeleton(shape).forward_block_prefill_sequence(
         &hidden_tokens,
         &mut cache,
         args.layer,
@@ -78,11 +90,7 @@ fn main() -> fish_s2_infer::Result<()> {
     Ok(())
 }
 
-fn build_dump(
-    args: &Args,
-    shape: SlowArLayerShape,
-    outputs: Vec<SlowArLayerForwardOutput>,
-) -> Dump {
+fn build_dump(args: &Args, shape: SlowArLayerShape, outputs: Vec<SlowArLayerBlockOutput>) -> Dump {
     let mut sequence = outputs
         .iter()
         .enumerate()
@@ -111,20 +119,32 @@ fn build_dump(
         attention: first.attention,
         projected: first.projected,
         hidden: first.hidden,
+        ffn_normalized: first.ffn_normalized,
+        ffn_gate: first.ffn_gate,
+        ffn_up: first.ffn_up,
+        ffn_activated: first.ffn_activated,
+        ffn_projected: first.ffn_projected,
+        block_hidden: first.block_hidden,
         sequence,
     }
 }
 
-fn build_token_dump(position: usize, output: &SlowArLayerForwardOutput) -> TokenDump {
+fn build_token_dump(position: usize, output: &SlowArLayerBlockOutput) -> TokenDump {
     TokenDump {
         position,
-        normalized: stats(&output.normalized),
-        query: stats(&output.query),
-        key: stats(&output.key),
-        value: stats(&output.value),
-        attention: stats(&output.attention),
-        projected: stats(&output.projected),
-        hidden: stats(&output.hidden),
+        normalized: stats(&output.attention.normalized),
+        query: stats(&output.attention.query),
+        key: stats(&output.attention.key),
+        value: stats(&output.attention.value),
+        attention: stats(&output.attention.attention),
+        projected: stats(&output.attention.projected),
+        hidden: stats(&output.attention.hidden),
+        ffn_normalized: stats(&output.feed_forward.normalized),
+        ffn_gate: stats(&output.feed_forward.gate),
+        ffn_up: stats(&output.feed_forward.up),
+        ffn_activated: stats(&output.feed_forward.activated),
+        ffn_projected: stats(&output.feed_forward.projected),
+        block_hidden: stats(&output.hidden),
     }
 }
 
