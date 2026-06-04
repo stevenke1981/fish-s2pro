@@ -16,7 +16,9 @@
 
 - [mach92432/s2.cpp](https://github.com/mach92432/s2.cpp) — `include/s2_pipeline.h`, `src/` (Dual-AR + codec on **ggml**)
 - Pipeline: text → BPE tokens → **Slow-AR** (36L Qwen3, KV cache) → **Fast-AR** (4L, 10 codebooks/step) → **RVQ codec** → WAV
-- Models: [mach9243/s2-pro-gguf](https://huggingface.co/mach9243/s2-pro-gguf) (`*-transformer-only.gguf` + `*-codec-only.gguf`)
+- Models:
+  - [fishaudio/s2-pro](https://huggingface.co/fishaudio/s2-pro) — official Safetensors/BF16 source checkpoint and tokenizer.
+  - [mach9243/s2-pro-gguf](https://huggingface.co/mach9243/s2-pro-gguf) — GGUF runtime pairs currently consumed by the Rust GGUF loader and s2.cpp-compatible fallback (`*-transformer-only.gguf` + `*-codec-only.gguf`).
 
 ---
 
@@ -160,7 +162,7 @@
 
 - [ ] **9.1** Remove subprocess fallback or gate behind `legacy-s2-exe` feature.
 - [ ] **9.2** Delete unused `fish_s2_core::server::ServerProcess` if fully deprecated.
-- [ ] **9.3** Update `models/README.txt` + download script for quant variants.
+- [x] **9.3** Update `models/README.txt` + download script for model sources. `scripts/download_models.ps1` now supports `fishaudio/s2-pro` official checkpoint downloads via `-IncludeOfficialCheckpoint` and GGUF runtime pairs via `-IncludeGguf -Quant ...`; direct Rust inference still uses GGUF while official Safetensors are tokenizer/source/conversion inputs.
 - [ ] **9.4** License attribution: Fish Audio Research License in binary distributions.
 
 ---

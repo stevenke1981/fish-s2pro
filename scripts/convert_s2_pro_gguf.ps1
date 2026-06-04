@@ -1,17 +1,22 @@
 # Export fishaudio/s2-pro Safetensors checkpoint to GGUF using rodrigomatta/s2.cpp quantize script.
 # Prerequisites: Python 3, pip install numpy torch gguf safetensors
 # Usage:
-#   .\scripts\convert_s2_pro_gguf.ps1 -CheckpointDir "D:\models\s2-pro" -Output "D:\models\s2-pro-f16.gguf"
+#   .\scripts\download_models.ps1 -IncludeOfficialCheckpoint
+#   .\scripts\convert_s2_pro_gguf.ps1 -Output ".\models\s2-pro-f16.gguf"
 
 param(
     [Parameter(Mandatory = $true)]
-    [string] $CheckpointDir,
-    [Parameter(Mandatory = $true)]
     [string] $Output,
+    [string] $CheckpointDir = "",
     [string] $Script = "",
     [string] $OutDtype = "f16",
     [string] $Python = "python"
 )
+
+$root = Split-Path $PSScriptRoot -Parent
+if ([string]::IsNullOrWhiteSpace($CheckpointDir)) {
+    $CheckpointDir = Join-Path (Join-Path $root "models") "s2-pro"
+}
 
 $codec = Join-Path $CheckpointDir "codec.pth"
 if (-not (Test-Path $codec)) {

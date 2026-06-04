@@ -6,6 +6,7 @@
 /models/*.pth
 /models/*.bin
 /models/tokenizer.json
+/models/s2-pro/
 /models/reference.wav
 /models/reference.txt
 

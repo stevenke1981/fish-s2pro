@@ -2,6 +2,7 @@
 #
 # Usage:
 #   .\scripts\download_models.ps1
+#   .\scripts\download_models.ps1 -IncludeOfficialCheckpoint -DryRun
 #   .\scripts\download_models.ps1 -IncludeGguf -Quant f16
 #   .\scripts\download_models.ps1 -IncludeGguf -Quant q4_k_m -DryRun
 #
@@ -9,9 +10,12 @@
 
 param(
     [switch] $SkipTokenizer,
+    [switch] $IncludeOfficialCheckpoint,
     [switch] $IncludeGguf,
     [ValidateSet("f16", "f32", "q8_0", "q6_k", "q5_k_m", "q4_k_m")]
     [string] $Quant = "f16",
+    [string] $OfficialRepo = "fishaudio/s2-pro",
+    [string] $OfficialSubdir = "s2-pro",
     [string] $GgufRepo = "mach9243/s2-pro-gguf",
     [switch] $DryRun,
     [switch] $Force
@@ -32,9 +36,10 @@ Require-HfCli
 
 function Invoke-HfDownload {
     param(
-        [string[]] $DownloadArgs
+        [string[]] $DownloadArgs,
+        [string] $LocalDir = $models
     )
-    $cmd = @("download") + $DownloadArgs + @("--local-dir", $models)
+    $cmd = @("download") + $DownloadArgs + @("--local-dir", $LocalDir)
     if ($DryRun) { $cmd += "--dry-run" }
     if ($Force) { $cmd += "--force-download" }
     & hf @cmd
@@ -44,8 +49,28 @@ function Invoke-HfDownload {
 }
 
 if (-not $SkipTokenizer) {
-    Write-Host "Downloading tokenizer.json -> models/"
-    Invoke-HfDownload -DownloadArgs @("fishaudio/s2-pro", "tokenizer.json")
+    Write-Host "Downloading tokenizer.json from $OfficialRepo -> models/"
+    Invoke-HfDownload -DownloadArgs @($OfficialRepo, "tokenizer.json")
+}
+
+if ($IncludeOfficialCheckpoint) {
+    $officialDir = Join-Path $models $OfficialSubdir
+    New-Item -ItemType Directory -Force -Path $officialDir | Out-Null
+    Write-Host "Downloading official Safetensors checkpoint from $OfficialRepo -> $officialDir"
+    Invoke-HfDownload `
+        -LocalDir $officialDir `
+        -DownloadArgs @(
+            $OfficialRepo,
+            "--include", "config.json",
+            "--include", "model*.safetensors",
+            "--include", "model.safetensors.index.json",
+            "--include", "codec.pth",
+            "--include", "tokenizer.json",
+            "--include", "tokenizer_config.json",
+            "--include", "special_tokens_map.json",
+            "--include", "chat_template.jinja",
+            "--include", "LICENSE.md"
+        )
 }
 
 if ($IncludeGguf) {
@@ -63,5 +88,6 @@ Write-Host ""
 Write-Host "Done. Place or verify in:"
 Write-Host "  $models"
 Write-Host "  tokenizer.json + *-transformer-only.gguf + *-codec-only.gguf"
+Write-Host "  $OfficialSubdir\config.json + model*.safetensors + codec.pth (optional official checkpoint)"
 Write-Host ""
 Write-Host "Start GUI: cargo run -p fish_s2_gui"
