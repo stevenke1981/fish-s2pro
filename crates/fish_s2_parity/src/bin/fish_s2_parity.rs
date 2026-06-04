@@ -2,7 +2,8 @@ use std::env;
 use std::process::ExitCode;
 
 use fish_s2_parity::{
-    compare_wav_files, metrics_from_wav_file, ParityError, ParityTolerance, Result,
+    compare_slow_ar_dump_files, compare_wav_files, metrics_from_wav_file, ParityError,
+    ParityTolerance, Result, SlowArTensorTolerance,
 };
 
 fn main() -> ExitCode {
@@ -50,11 +51,36 @@ fn run() -> Result<()> {
                 Err(ParityError::Message("WAV parity failed".into()))
             }
         }
+        Some("compare-slow-ar") => {
+            let expected = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let actual = args.next().ok_or_else(|| ParityError::Message(usage()))?;
+            let report =
+                compare_slow_ar_dump_files(expected, actual, SlowArTensorTolerance::default())?;
+            println!("passed={}", report.passed);
+            for delta in &report.tensor_deltas {
+                println!(
+                    "tensor={} l2_delta={:.8} mean_abs_delta={:.8} max_abs_delta={:.8} first8_mae={:.8}",
+                    delta.name,
+                    delta.l2_delta,
+                    delta.mean_abs_delta,
+                    delta.max_abs_delta,
+                    delta.first8_mae
+                );
+            }
+            for failure in &report.failures {
+                println!("failure={failure}");
+            }
+            if report.passed {
+                Ok(())
+            } else {
+                Err(ParityError::Message("Slow-AR tensor parity failed".into()))
+            }
+        }
         _ => Err(ParityError::Message(usage())),
     }
 }
 
 fn usage() -> String {
-    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>"
+    "usage:\n  fish_s2_parity metrics <wav>\n  fish_s2_parity compare <golden.wav> <candidate.wav>\n  fish_s2_parity compare-slow-ar <expected.json> <actual.json>"
         .to_string()
 }

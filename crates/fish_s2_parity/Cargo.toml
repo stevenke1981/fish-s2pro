@@ -6,4 +6,6 @@ license.workspace = true
 description = "Golden WAV metrics and parity checks for Fish S2 Pro inference"
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true

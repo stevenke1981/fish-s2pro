@@ -119,6 +119,10 @@ Phase 4.2 prep slice:
   Rust fixture, including len/L2/mean_abs/max_abs/first8 for normalized, Q, K,
   V, attention, projection, and final hidden state. This is the Rust side of the
   next C++ dump parity step.
+- `fish_s2_parity compare-slow-ar` compares two Slow-AR JSON stats dumps with
+  strict per-tensor len/L2/mean_abs/max_abs/first8 tolerances. It currently
+  validates the Rust dump format and will be reused once the matching s2.cpp dump
+  exists.
 
 Root tensor specs:
 
@@ -167,11 +171,13 @@ cargo test -p fish_s2_infer slow_ar::tests::binds_local_layer0_f16_weights_and_r
 cargo test -p fish_s2_infer registry::tests::validates_local_transformer_registry -- --ignored
 cargo test -p fish_s2_infer tensor::tests::loads_local_norm_weight_as_f16_tensor -- --ignored
 cargo run -p fish_s2_infer --bin fish_s2_slow_ar_dump -- --transformer .\models\s2-pro-f16-transformer-only.gguf --output .\output\slow_ar_layer0_rust_stats.json
+cargo run -p fish_s2_parity --bin fish_s2_parity -- compare-slow-ar .\output\slow_ar_layer0_rust_stats.json .\output\slow_ar_layer0_rust_stats.json
 cargo clippy --all-targets -- -D warnings
 ```
 
 Next Phase 4 work:
 
 - Add typed views for quantized weights needed by non-F16 model variants.
-- Add C++ dump parity for the layer 0 single-token fixture, then broaden from
-  decode-only token to prefill over multiple tokens.
+- Add the C++ JSON stats dump for the layer 0 single-token fixture, feed it to
+  `fish_s2_parity compare-slow-ar`, then broaden from decode-only token to
+  prefill over multiple tokens.

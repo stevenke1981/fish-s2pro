@@ -63,6 +63,200 @@ pub fn compare_wav_files(
     Ok(compare_metrics(&expected, &actual, tolerance))
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SlowArDump {
+    pub transformer: String,
+    pub layer: usize,
+    pub position: usize,
+    pub hidden_size: usize,
+    pub head_count: usize,
+    pub head_count_kv: usize,
+    pub head_dim: usize,
+    pub normalized: TensorStats,
+    pub query: TensorStats,
+    pub key: TensorStats,
+    pub value: TensorStats,
+    pub attention: TensorStats,
+    pub projected: TensorStats,
+    pub hidden: TensorStats,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TensorStats {
+    pub len: usize,
+    pub l2: f64,
+    pub mean_abs: f64,
+    pub max_abs: f64,
+    pub first8: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SlowArTensorTolerance {
+    pub max_l2_delta: f64,
+    pub max_mean_abs_delta: f64,
+    pub max_max_abs_delta: f64,
+    pub max_first8_mae: f64,
+}
+
+impl Default for SlowArTensorTolerance {
+    fn default() -> Self {
+        Self {
+            max_l2_delta: 1e-3,
+            max_mean_abs_delta: 1e-5,
+            max_max_abs_delta: 1e-3,
+            max_first8_mae: 1e-5,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SlowArTensorDelta {
+    pub name: &'static str,
+    pub l2_delta: f64,
+    pub mean_abs_delta: f64,
+    pub max_abs_delta: f64,
+    pub first8_mae: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlowArParityReport {
+    pub passed: bool,
+    pub tensor_deltas: Vec<SlowArTensorDelta>,
+    pub failures: Vec<String>,
+}
+
+pub fn slow_ar_dump_from_file(path: impl AsRef<Path>) -> Result<SlowArDump> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|err| ParityError::Message(err.to_string()))
+}
+
+pub fn compare_slow_ar_dump_files(
+    expected: impl AsRef<Path>,
+    actual: impl AsRef<Path>,
+    tolerance: SlowArTensorTolerance,
+) -> Result<SlowArParityReport> {
+    let expected = slow_ar_dump_from_file(expected)?;
+    let actual = slow_ar_dump_from_file(actual)?;
+    Ok(compare_slow_ar_dumps(&expected, &actual, tolerance))
+}
+
+pub fn compare_slow_ar_dumps(
+    expected: &SlowArDump,
+    actual: &SlowArDump,
+    tolerance: SlowArTensorTolerance,
+) -> SlowArParityReport {
+    let mut failures = Vec::new();
+    compare_metadata(expected, actual, &mut failures);
+    let pairs = [
+        ("normalized", &expected.normalized, &actual.normalized),
+        ("query", &expected.query, &actual.query),
+        ("key", &expected.key, &actual.key),
+        ("value", &expected.value, &actual.value),
+        ("attention", &expected.attention, &actual.attention),
+        ("projected", &expected.projected, &actual.projected),
+        ("hidden", &expected.hidden, &actual.hidden),
+    ];
+
+    let mut tensor_deltas = Vec::with_capacity(pairs.len());
+    for (name, expected, actual) in pairs {
+        let delta = compare_tensor_stats(name, expected, actual, tolerance, &mut failures);
+        tensor_deltas.push(delta);
+    }
+
+    SlowArParityReport {
+        passed: failures.is_empty(),
+        tensor_deltas,
+        failures,
+    }
+}
+
+fn compare_metadata(expected: &SlowArDump, actual: &SlowArDump, failures: &mut Vec<String>) {
+    let checks = [
+        ("layer", expected.layer, actual.layer),
+        ("position", expected.position, actual.position),
+        ("hidden_size", expected.hidden_size, actual.hidden_size),
+        ("head_count", expected.head_count, actual.head_count),
+        (
+            "head_count_kv",
+            expected.head_count_kv,
+            actual.head_count_kv,
+        ),
+        ("head_dim", expected.head_dim, actual.head_dim),
+    ];
+    for (name, expected, actual) in checks {
+        if expected != actual {
+            failures.push(format!(
+                "{name} mismatch: expected {expected}, actual {actual}"
+            ));
+        }
+    }
+}
+
+fn compare_tensor_stats(
+    name: &'static str,
+    expected: &TensorStats,
+    actual: &TensorStats,
+    tolerance: SlowArTensorTolerance,
+    failures: &mut Vec<String>,
+) -> SlowArTensorDelta {
+    if expected.len != actual.len {
+        failures.push(format!(
+            "{name}.len mismatch: expected {}, actual {}",
+            expected.len, actual.len
+        ));
+    }
+    let l2_delta = (expected.l2 - actual.l2).abs();
+    let mean_abs_delta = (expected.mean_abs - actual.mean_abs).abs();
+    let max_abs_delta = (expected.max_abs - actual.max_abs).abs();
+    let first8_mae = first8_mae(&expected.first8, &actual.first8);
+    if l2_delta > tolerance.max_l2_delta {
+        failures.push(format!(
+            "{name}.l2 delta {l2_delta:.8} exceeds {:.8}",
+            tolerance.max_l2_delta
+        ));
+    }
+    if mean_abs_delta > tolerance.max_mean_abs_delta {
+        failures.push(format!(
+            "{name}.mean_abs delta {mean_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_mean_abs_delta
+        ));
+    }
+    if max_abs_delta > tolerance.max_max_abs_delta {
+        failures.push(format!(
+            "{name}.max_abs delta {max_abs_delta:.8} exceeds {:.8}",
+            tolerance.max_max_abs_delta
+        ));
+    }
+    if first8_mae > tolerance.max_first8_mae {
+        failures.push(format!(
+            "{name}.first8 MAE {first8_mae:.8} exceeds {:.8}",
+            tolerance.max_first8_mae
+        ));
+    }
+    SlowArTensorDelta {
+        name,
+        l2_delta,
+        mean_abs_delta,
+        max_abs_delta,
+        first8_mae,
+    }
+}
+
+fn first8_mae(expected: &[f64], actual: &[f64]) -> f64 {
+    let len = expected.len().max(actual.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let sum: f64 = (0..len)
+        .map(|index| {
+            let expected = expected.get(index).copied().unwrap_or(0.0);
+            let actual = actual.get(index).copied().unwrap_or(0.0);
+            (expected - actual).abs()
+        })
+        .sum();
+    sum / len as f64
+}
+
 pub fn compare_metrics(
     expected: &WavMetrics,
     actual: &WavMetrics,
@@ -322,6 +516,25 @@ mod tests {
     }
 
     #[test]
+    fn compares_identical_slow_ar_dumps() {
+        let dump: SlowArDump = serde_json::from_str(test_slow_ar_dump_json()).unwrap();
+        let report = compare_slow_ar_dumps(&dump, &dump, SlowArTensorTolerance::default());
+        assert!(report.passed);
+        assert!(report.failures.is_empty());
+        assert_eq!(report.tensor_deltas.len(), 7);
+    }
+
+    #[test]
+    fn reports_slow_ar_tensor_delta_failure() {
+        let expected: SlowArDump = serde_json::from_str(test_slow_ar_dump_json()).unwrap();
+        let mut actual = expected.clone();
+        actual.query.l2 += 0.1;
+        let report = compare_slow_ar_dumps(&expected, &actual, SlowArTensorTolerance::default());
+        assert!(!report.passed);
+        assert!(report.failures.iter().any(|f| f.contains("query.l2")));
+    }
+
+    #[test]
     #[ignore = "requires FISH_S2_PARITY=1 plus golden/candidate WAV paths"]
     fn compares_env_candidate_to_golden() {
         if std::env::var("FISH_S2_PARITY").ok().as_deref() != Some("1") {
@@ -356,5 +569,24 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+
+    fn test_slow_ar_dump_json() -> &'static str {
+        r#"{
+          "transformer": "model.gguf",
+          "layer": 0,
+          "position": 0,
+          "hidden_size": 4,
+          "head_count": 2,
+          "head_count_kv": 1,
+          "head_dim": 2,
+          "normalized": {"len": 4, "l2": 1.0, "mean_abs": 0.25, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 0.0]},
+          "query": {"len": 4, "l2": 2.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0, 0.0, 1.0]},
+          "key": {"len": 2, "l2": 1.0, "mean_abs": 0.5, "max_abs": 1.0, "first8": [1.0, 0.0]},
+          "value": {"len": 2, "l2": 3.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0]},
+          "attention": {"len": 4, "l2": 4.0, "mean_abs": 1.5, "max_abs": 3.0, "first8": [3.0, 0.0, 3.0, 0.0]},
+          "projected": {"len": 4, "l2": 5.0, "mean_abs": 2.25, "max_abs": 6.0, "first8": [3.0, 6.0, 0.0, 0.0]},
+          "hidden": {"len": 4, "l2": 6.0, "mean_abs": 2.5, "max_abs": 6.0, "first8": [4.0, 6.0, 0.0, 0.0]}
+        }"#
     }
 }
