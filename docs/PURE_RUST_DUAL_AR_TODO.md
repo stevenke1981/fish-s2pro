@@ -130,8 +130,14 @@
 - [x] C++ RVQ lookup parity hook
   - Add s2.cpp dump for the same codebook lookup/projection/sum stage before porting pre/post module math.
   - Acceptance: `scripts/dump_rvq_lookup_parity.ps1` builds `s2_rvq_lookup_dump`, compares `decode_codes_stage(...)` vs Rust `rvq_lookup_codes(...)`, and passes on greedy `hi` (`latent_l2_delta=0.00000013`, `latent_first8_mae=0.00000005`).
+- [x] `fish_s2_infer::codec::forward_codec_post_module(latents) -> CodecPostModuleResult`
+  - Port the RVQ post-module transformer block: RMSNorm -> WQKV -> RoPE -> causal/windowed attention -> output projection -> layer scale -> FFN/SwiGLU -> final norm.
+  - Acceptance: ignored local GGUF smoke runs `rvq_lookup_codes(...)` then 8-layer post-module on greedy `hi`; `fish_s2_post_module_dump` writes finite stats to `output/post_module_hi_rust.json` (`2 frames x 1024 hidden`).
+- [ ] C++ post-module transformer parity hook
+  - Add an s2.cpp dump for `build_transformer(quantizer.post_module)` before upsample so Rust post-module math can be pinned independently.
+  - Acceptance: Rust `post_module_hi_rust.json` stats/first values match C++ hook within tolerance.
 - [ ] `fish_s2_infer::codec::rvq_decode_latents(latents) -> acoustic_features`
-  - Port RVQ pre/post module and quantizer upsample/downsample path after lookup parity is pinned.
+  - Port quantizer upsample ConvTranspose + ConvNeXt stages after post-module parity is pinned.
   - Acceptance: code fixture dequant stats parity vs s2.cpp codec hook.
 - [ ] `fish_s2_infer::codec::decode_waveform(codes) -> Pcm/Wav`
   - Port post-module transformer/ConvNeXt/upsample path.
@@ -344,4 +350,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-04 — Codec/RVQ: C++ RVQ lookup parity hook passes; next: RVQ pre/post module fixture*
+*Last updated: 2026-06-04 — Codec/RVQ: Rust post-module transformer fixture passes; next: C++ post-module parity + quantizer upsample*

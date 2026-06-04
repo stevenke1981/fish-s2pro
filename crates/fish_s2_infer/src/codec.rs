@@ -8,8 +8,9 @@ use std::path::Path;
 
 use fish_s2_core::gguf::{GgmlType, GgufFile, GgufTensorInfo};
 
+use crate::attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape};
 use crate::error::{InferError, Result};
-use crate::tensor::{embedding_lookup_rows, linear, F16TensorView};
+use crate::tensor::{embedding_lookup_rows, linear, rms_norm, F16TensorView};
 
 pub const CODEC_ARCHITECTURE: &str = "fish-speech-codec";
 pub const CODEC_HIDDEN_SIZE: u64 = 1024;
@@ -22,6 +23,11 @@ pub const CODEC_ATTENTION_WQKV_OUT: u64 = 3072;
 pub const CODEC_FEED_FORWARD_SIZE: u64 = 3072;
 pub const CODEC_CONTEXT_LENGTH: u64 = 4096;
 pub const CODEC_FREQ_HEADS: u64 = 32;
+pub const CODEC_RVQ_HEAD_DIM: usize = 64;
+pub const CODEC_RVQ_LOCAL_HEADS: usize = 16;
+pub const CODEC_RVQ_ROPE_BASE: f32 = 10_000.0;
+pub const CODEC_RVQ_NORM_EPS: f32 = 1e-5;
+pub const CODEC_RVQ_WINDOW_SIZE: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct CodecTensorRegistry {
@@ -275,6 +281,183 @@ impl CodecTransformerLayerWeights {
             ffn_layer_scale: format!("{prefix}.ffn_layer_scale.gamma"),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecPostModuleF16Weights {
+    pub layers: Vec<CodecTransformerLayerF16Weights>,
+    pub norm_weight: F16TensorView,
+}
+
+impl CodecPostModuleF16Weights {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        let registry = CodecTensorRegistry::from_gguf(gguf)?;
+        Self::from_gguf_registry(gguf, &registry)
+    }
+
+    pub fn from_gguf_registry(gguf: &GgufFile, registry: &CodecTensorRegistry) -> Result<Self> {
+        let layers = registry
+            .post_module_layers()
+            .iter()
+            .map(|names| CodecTransformerLayerF16Weights::from_names(gguf, names))
+            .collect::<Result<Vec<_>>>()?;
+        let weights = Self {
+            layers,
+            norm_weight: F16TensorView::from_gguf(gguf, "quantizer.post_module.norm.weight")?,
+        };
+        weights.validate_dimensions()?;
+        Ok(weights)
+    }
+
+    fn validate_dimensions(&self) -> Result<()> {
+        if self.layers.len() != CODEC_TRANSFORMER_LAYERS {
+            return Err(InferError::Message(format!(
+                "codec post_module layer count mismatch: expected {}, got {}",
+                CODEC_TRANSFORMER_LAYERS,
+                self.layers.len()
+            )));
+        }
+        validate_f16_dims(
+            self.norm_weight.name(),
+            self.norm_weight.dimensions(),
+            &[CODEC_HIDDEN_SIZE as usize],
+        )?;
+        for layer in &self.layers {
+            layer.validate_dimensions()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecTransformerLayerF16Weights {
+    pub module: String,
+    pub layer: usize,
+    pub attention_wqkv: F16TensorView,
+    pub attention_output: F16TensorView,
+    pub attention_norm: F16TensorView,
+    pub ffn_norm: F16TensorView,
+    pub feed_forward_w1: F16TensorView,
+    pub feed_forward_w2: F16TensorView,
+    pub feed_forward_w3: F16TensorView,
+    pub attention_layer_scale: F16TensorView,
+    pub ffn_layer_scale: F16TensorView,
+}
+
+impl CodecTransformerLayerF16Weights {
+    fn from_names(gguf: &GgufFile, names: &CodecTransformerLayerWeights) -> Result<Self> {
+        Ok(Self {
+            module: names.module.clone(),
+            layer: names.layer,
+            attention_wqkv: F16TensorView::from_gguf(gguf, &names.attention_wqkv)?,
+            attention_output: F16TensorView::from_gguf(gguf, &names.attention_output)?,
+            attention_norm: F16TensorView::from_gguf(gguf, &names.attention_norm)?,
+            ffn_norm: F16TensorView::from_gguf(gguf, &names.ffn_norm)?,
+            feed_forward_w1: F16TensorView::from_gguf(gguf, &names.feed_forward_w1)?,
+            feed_forward_w2: F16TensorView::from_gguf(gguf, &names.feed_forward_w2)?,
+            feed_forward_w3: F16TensorView::from_gguf(gguf, &names.feed_forward_w3)?,
+            attention_layer_scale: F16TensorView::from_gguf(gguf, &names.attention_layer_scale)?,
+            ffn_layer_scale: F16TensorView::from_gguf(gguf, &names.ffn_layer_scale)?,
+        })
+    }
+
+    fn validate_dimensions(&self) -> Result<()> {
+        let specs = [
+            (
+                self.attention_wqkv.name(),
+                self.attention_wqkv.dimensions(),
+                vec![
+                    CODEC_HIDDEN_SIZE as usize,
+                    CODEC_ATTENTION_WQKV_OUT as usize,
+                ],
+            ),
+            (
+                self.attention_output.name(),
+                self.attention_output.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize, CODEC_HIDDEN_SIZE as usize],
+            ),
+            (
+                self.feed_forward_w1.name(),
+                self.feed_forward_w1.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize, CODEC_FEED_FORWARD_SIZE as usize],
+            ),
+            (
+                self.feed_forward_w3.name(),
+                self.feed_forward_w3.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize, CODEC_FEED_FORWARD_SIZE as usize],
+            ),
+            (
+                self.feed_forward_w2.name(),
+                self.feed_forward_w2.dimensions(),
+                vec![CODEC_FEED_FORWARD_SIZE as usize, CODEC_HIDDEN_SIZE as usize],
+            ),
+            (
+                self.ffn_norm.name(),
+                self.ffn_norm.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize],
+            ),
+            (
+                self.attention_norm.name(),
+                self.attention_norm.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize],
+            ),
+            (
+                self.attention_layer_scale.name(),
+                self.attention_layer_scale.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize],
+            ),
+            (
+                self.ffn_layer_scale.name(),
+                self.ffn_layer_scale.dimensions(),
+                vec![CODEC_HIDDEN_SIZE as usize],
+            ),
+        ];
+        for (name, actual, expected) in specs {
+            validate_f16_dims(name, actual, &expected)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodecPostModuleResult {
+    pub n_frames: u32,
+    pub hidden_dim: usize,
+    pub hidden: Vec<f32>,
+}
+
+pub fn forward_codec_post_module(
+    latents: &[f32],
+    n_frames: u32,
+    weights: &CodecPostModuleF16Weights,
+) -> Result<CodecPostModuleResult> {
+    let n_frames_usize = usize::try_from(n_frames)
+        .map_err(|_| InferError::Message("n_frames overflows usize".into()))?;
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    let expected_len = n_frames_usize
+        .checked_mul(hidden_dim)
+        .ok_or_else(|| InferError::Message("post_module input length overflow".into()))?;
+    if latents.len() != expected_len {
+        return Err(InferError::Message(format!(
+            "post_module input length mismatch: expected {expected_len}, got {}",
+            latents.len()
+        )));
+    }
+    let mut tokens = latents
+        .chunks_exact(hidden_dim)
+        .map(|chunk| chunk.to_vec())
+        .collect::<Vec<_>>();
+    for layer in &weights.layers {
+        tokens = forward_codec_transformer_layer(&tokens, layer)?;
+    }
+    for token in &mut tokens {
+        *token = rms_norm(token, weights.norm_weight.values(), CODEC_RVQ_NORM_EPS)?;
+    }
+    Ok(CodecPostModuleResult {
+        n_frames,
+        hidden_dim,
+        hidden: tokens.into_iter().flatten().collect(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -740,6 +923,158 @@ fn metadata_value<'a>(gguf: &'a GgufFile, key: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+fn forward_codec_transformer_layer(
+    tokens: &[Vec<f32>],
+    weights: &CodecTransformerLayerF16Weights,
+) -> Result<Vec<Vec<f32>>> {
+    if tokens.is_empty() {
+        return Err(InferError::Message(
+            "codec post_module requires at least one frame".into(),
+        ));
+    }
+    let hidden_dim = CODEC_HIDDEN_SIZE as usize;
+    for token in tokens {
+        if token.len() != hidden_dim {
+            return Err(InferError::Message(format!(
+                "codec post_module token length mismatch: expected {hidden_dim}, got {}",
+                token.len()
+            )));
+        }
+    }
+
+    let mut prepared = Vec::with_capacity(tokens.len());
+    for (position, token) in tokens.iter().enumerate() {
+        let normalized = rms_norm(token, weights.attention_norm.values(), CODEC_RVQ_NORM_EPS)?;
+        let qkv = linear(
+            &normalized,
+            weights.attention_wqkv.values(),
+            hidden_dim,
+            CODEC_ATTENTION_WQKV_OUT as usize,
+        )?;
+        let q_size = hidden_dim;
+        let kv_size = CODEC_RVQ_LOCAL_HEADS * CODEC_RVQ_HEAD_DIM;
+        let (query_raw, rest) = qkv.split_at(q_size);
+        let (key_raw, value_raw) = rest.split_at(kv_size);
+        let mut query = query_raw.to_vec();
+        let mut key = key_raw.to_vec();
+        apply_rope_normal(
+            &mut query,
+            CODEC_RVQ_HEAD_DIM,
+            position,
+            CODEC_RVQ_ROPE_BASE,
+        )?;
+        apply_rope_normal(&mut key, CODEC_RVQ_HEAD_DIM, position, CODEC_RVQ_ROPE_BASE)?;
+        prepared.push((query, key, value_raw.to_vec()));
+    }
+
+    let mut attention_outputs = Vec::with_capacity(tokens.len());
+    for (offset, token) in tokens.iter().enumerate() {
+        let visible_start = (offset + 1).saturating_sub(CODEC_RVQ_WINDOW_SIZE);
+        let visible_count = offset + 1 - visible_start;
+        let mut keys = Vec::with_capacity(visible_count * hidden_dim);
+        let mut values = Vec::with_capacity(visible_count * hidden_dim);
+        for (_, key, value) in &prepared[visible_start..=offset] {
+            keys.extend_from_slice(key);
+            values.extend_from_slice(value);
+        }
+        let attention = gqa_decode_attention(
+            &prepared[offset].0,
+            &keys,
+            &values,
+            GqaAttentionShape {
+                head_count: hidden_dim / CODEC_RVQ_HEAD_DIM,
+                head_count_kv: CODEC_RVQ_LOCAL_HEADS,
+                head_dim: CODEC_RVQ_HEAD_DIM,
+                token_count: visible_count,
+                attn_scale: (CODEC_RVQ_HEAD_DIM as f32).sqrt().recip(),
+            },
+        )?;
+        let projected = linear(
+            &attention,
+            weights.attention_output.values(),
+            hidden_dim,
+            hidden_dim,
+        )?;
+        let scaled = scale_channels(&projected, weights.attention_layer_scale.values())?;
+        attention_outputs.push(add_residual(token, &scaled)?);
+    }
+
+    let mut outputs = Vec::with_capacity(tokens.len());
+    for token in attention_outputs {
+        let ff_in = rms_norm(&token, weights.ffn_norm.values(), CODEC_RVQ_NORM_EPS)?;
+        let gate = linear(
+            &ff_in,
+            weights.feed_forward_w1.values(),
+            hidden_dim,
+            CODEC_FEED_FORWARD_SIZE as usize,
+        )?;
+        let up = linear(
+            &ff_in,
+            weights.feed_forward_w3.values(),
+            hidden_dim,
+            CODEC_FEED_FORWARD_SIZE as usize,
+        )?;
+        let activated = gate
+            .iter()
+            .zip(&up)
+            .map(|(gate, up)| silu(*gate) * up)
+            .collect::<Vec<_>>();
+        let ff = linear(
+            &activated,
+            weights.feed_forward_w2.values(),
+            CODEC_FEED_FORWARD_SIZE as usize,
+            hidden_dim,
+        )?;
+        let scaled = scale_channels(&ff, weights.ffn_layer_scale.values())?;
+        outputs.push(add_residual(&token, &scaled)?);
+    }
+    Ok(outputs)
+}
+
+fn validate_f16_dims(name: &str, actual: &[usize], expected: &[usize]) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(InferError::Message(format!(
+            "{name}: expected {expected:?}, got {actual:?}"
+        )))
+    }
+}
+
+fn scale_channels(values: &[f32], scale: &[f32]) -> Result<Vec<f32>> {
+    if values.len() != scale.len() {
+        return Err(InferError::Message(format!(
+            "scale length mismatch: values={} scale={}",
+            values.len(),
+            scale.len()
+        )));
+    }
+    Ok(values
+        .iter()
+        .zip(scale)
+        .map(|(value, scale)| value * scale)
+        .collect())
+}
+
+fn add_residual(residual: &[f32], delta: &[f32]) -> Result<Vec<f32>> {
+    if residual.len() != delta.len() {
+        return Err(InferError::Message(format!(
+            "residual length mismatch: residual={} delta={}",
+            residual.len(),
+            delta.len()
+        )));
+    }
+    Ok(residual
+        .iter()
+        .zip(delta)
+        .map(|(residual, delta)| residual + delta)
+        .collect())
+}
+
+fn silu(value: f32) -> f32 {
+    value / (1.0 + (-value).exp())
+}
+
 fn add_bias(output: &mut [f32], bias: &[f32]) -> Result<()> {
     if output.len() != bias.len() {
         return Err(InferError::Message(format!(
@@ -835,6 +1170,33 @@ mod tests {
         assert_eq!(result.latents.len(), 2 * CODEC_HIDDEN_SIZE as usize);
         assert!(result.latents.iter().all(|value| value.is_finite()));
         assert!(result.latents.iter().any(|value| value.abs() > 0.0));
+    }
+
+    #[test]
+    #[ignore = "requires local s2-pro codec GGUF in models/"]
+    fn loads_post_module_f16_weights_and_runs_fixture() {
+        let path = fixture_codec_path().expect("codec gguf");
+        let gguf = GgufFile::open(&path).expect("codec gguf");
+        let rvq_weights = CodecF16Weights::from_gguf(&gguf).expect("codec f16 weights");
+        let post_weights =
+            CodecPostModuleF16Weights::from_gguf(&gguf).expect("post module f16 weights");
+        assert_eq!(post_weights.layers.len(), CODEC_TRANSFORMER_LAYERS);
+        assert_eq!(
+            post_weights.norm_weight.dimensions(),
+            &[CODEC_HIDDEN_SIZE as usize]
+        );
+
+        let codes = vec![
+            3988, 29, 487, 925, 184, 865, 526, 924, 37, 12, 189, 460, 854, 549, 947, 935, 339, 39,
+            892, 855,
+        ];
+        let rvq = rvq_lookup_codes(&codes, 10, 2, &rvq_weights).expect("rvq lookup");
+        let result = forward_codec_post_module(&rvq.latents, rvq.n_frames, &post_weights)
+            .expect("post module");
+        assert_eq!(result.hidden_dim, CODEC_HIDDEN_SIZE as usize);
+        assert_eq!(result.hidden.len(), 2 * CODEC_HIDDEN_SIZE as usize);
+        assert!(result.hidden.iter().all(|value| value.is_finite()));
+        assert!(result.hidden.iter().any(|value| value.abs() > 0.0));
     }
 
     #[test]
