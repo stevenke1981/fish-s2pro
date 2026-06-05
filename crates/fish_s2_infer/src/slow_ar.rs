@@ -7,7 +7,9 @@ use crate::error::{InferError, Result};
 use crate::registry::{
     ArGraphSpec, DualArGraphSpec, TransformerTensorRegistry, SLOW_CONTEXT_LENGTH,
 };
-use crate::tensor::{embedding_lookup_rows, linear, rms_norm, F16TensorView};
+use crate::tensor::{
+    embedding_lookup_rows, linear, matvec_f16_streaming, rms_norm, F16TensorBytes, F16TensorView,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlowArLayerShape {
@@ -225,7 +227,7 @@ pub struct SlowArLayerBlockOutput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlowArOutputHeadF16Weights {
     pub norm: F16TensorView,
-    pub embeddings: F16TensorView,
+    pub embeddings: F16TensorBytes,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -714,7 +716,7 @@ impl SlowArOutputHeadF16Weights {
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
         let weights = Self {
             norm: F16TensorView::from_gguf(gguf, "norm.weight")?,
-            embeddings: F16TensorView::from_gguf(gguf, "embeddings.weight")?,
+            embeddings: F16TensorBytes::from_gguf(gguf, "embeddings.weight")?,
         };
         weights.validate_dimensions()?;
         Ok(weights)
@@ -725,9 +727,9 @@ impl SlowArOutputHeadF16Weights {
         let hidden_size = self.norm.dimensions()[0];
         let vocab_size = self.embeddings.dimensions()[1];
         let normalized = rms_norm(hidden, self.norm.values(), rms_norm_eps)?;
-        let logits = linear(
+        let logits = matvec_f16_streaming(
             &normalized,
-            self.embeddings.values(),
+            self.embeddings.bytes(),
             hidden_size,
             vocab_size,
         )?;

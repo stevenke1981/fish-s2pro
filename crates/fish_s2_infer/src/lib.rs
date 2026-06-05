@@ -75,7 +75,10 @@ pub use slow_ar::{
     SlowArLayerShape, SlowArLayerSkeleton, SlowArLogitsOutput, SlowArOutputHeadF16Weights,
     SlowArState, SlowArStepResult,
 };
-pub use tensor::{embedding_lookup_rows, linear, linear_with_backend, rms_norm, F16TensorView};
+pub use tensor::{
+    embedding_lookup_rows, linear, linear_with_backend, matvec_f16_streaming, rms_norm,
+    F16TensorBytes, F16TensorView,
+};
 pub use tokenizer::{bytelevel_encode_utf8, gpt2_byte_to_unicode, S2Tokenizer, TokenizedText};
 pub use wav::{pcm_to_wav, read_wav_mono_f32, wav_mono_f32_from_bytes};
 

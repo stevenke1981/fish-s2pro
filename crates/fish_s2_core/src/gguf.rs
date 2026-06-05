@@ -94,12 +94,52 @@ impl GgufFile {
         self.read_tensor_bytes(tensor, tensor.byte_len()?.min(max_len))
     }
 
+    pub fn mapped_tensor_view(&self, name: &str) -> Result<MappedTensorView> {
+        let tensor = self
+            .tensor(name)
+            .ok_or_else(|| CoreError::Message(format!("tensor not found: {name}")))?;
+        Ok(MappedTensorView {
+            file_path: self.path.clone(),
+            name: tensor.name.clone(),
+            dimensions: tensor.dimensions.clone(),
+            ggml_type: tensor.ggml_type,
+            absolute_offset: tensor.absolute_offset(self.tensor_data_start),
+            byte_len: tensor.byte_len()?,
+        })
+    }
+
     fn read_tensor_bytes(&self, tensor: &GgufTensorInfo, len: usize) -> Result<Vec<u8>> {
         let mut file = File::open(&self.path).map_err(CoreError::Io)?;
         file.seek(SeekFrom::Start(
             tensor.absolute_offset(self.tensor_data_start),
         ))
         .map_err(CoreError::Io)?;
+        let mut bytes = vec![0u8; len];
+        file.read_exact(&mut bytes).map_err(CoreError::Io)?;
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MappedTensorView {
+    pub file_path: String,
+    pub name: String,
+    pub dimensions: Vec<u64>,
+    pub ggml_type: GgmlType,
+    pub absolute_offset: u64,
+    pub byte_len: usize,
+}
+
+impl MappedTensorView {
+    pub fn read_bytes(&self) -> Result<Vec<u8>> {
+        self.read_bytes_prefix(self.byte_len)
+    }
+
+    pub fn read_bytes_prefix(&self, max_len: usize) -> Result<Vec<u8>> {
+        let len = self.byte_len.min(max_len);
+        let mut file = File::open(&self.file_path).map_err(CoreError::Io)?;
+        file.seek(SeekFrom::Start(self.absolute_offset))
+            .map_err(CoreError::Io)?;
         let mut bytes = vec![0u8; len];
         file.read_exact(&mut bytes).map_err(CoreError::Io)?;
         Ok(bytes)
@@ -503,6 +543,14 @@ mod tests {
             .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+
+        let mapped = gguf.mapped_tensor_view("blk.0.weight").unwrap();
+        assert_eq!(mapped.name, "blk.0.weight");
+        assert_eq!(mapped.dimensions, vec![2, 2]);
+        assert_eq!(mapped.ggml_type, GgmlType::F32);
+        assert_eq!(mapped.byte_len, 16);
+        assert_eq!(mapped.read_bytes().unwrap(), bytes);
+        assert_eq!(mapped.read_bytes_prefix(4).unwrap(), 1.0_f32.to_le_bytes());
 
         let summary = GgufSummary::inspect(&path).unwrap();
         assert_eq!(summary.tensor_count, 1);

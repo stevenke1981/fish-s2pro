@@ -10,6 +10,13 @@ pub struct F16TensorView {
     values: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct F16TensorBytes {
+    name: String,
+    dimensions: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
 impl F16TensorView {
     pub fn from_gguf(gguf: &GgufFile, name: &str) -> Result<Self> {
         let tensor = gguf
@@ -76,6 +83,71 @@ impl F16TensorView {
 
     pub fn values(&self) -> &[f32] {
         &self.values
+    }
+}
+
+impl F16TensorBytes {
+    pub fn from_gguf(gguf: &GgufFile, name: &str) -> Result<Self> {
+        let tensor = gguf
+            .tensor(name)
+            .ok_or_else(|| InferError::Message(format!("tensor not found: {name}")))?;
+        if tensor.ggml_type != GgmlType::F16 {
+            return Err(InferError::Message(format!(
+                "expected F16 tensor {name}, got {:?}",
+                tensor.ggml_type
+            )));
+        }
+        let dimensions = tensor
+            .dimensions
+            .iter()
+            .map(|dim| {
+                usize::try_from(*dim).map_err(|_| {
+                    InferError::Message(format!("tensor dimension overflows usize: {name}"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bytes = gguf
+            .tensor_bytes(name)
+            .map_err(|err| InferError::Message(err.to_string()))?;
+        Self::from_f16_le_bytes(name, dimensions, bytes)
+    }
+
+    pub fn from_f16_le_bytes(
+        name: impl Into<String>,
+        dimensions: impl Into<Vec<usize>>,
+        bytes: Vec<u8>,
+    ) -> Result<Self> {
+        let dimensions = dimensions.into();
+        let element_count = dimensions.iter().try_fold(1usize, |acc, dim| {
+            acc.checked_mul(*dim)
+                .ok_or_else(|| InferError::Message("F16 tensor element count overflow".to_string()))
+        })?;
+        let expected_bytes = element_count
+            .checked_mul(2)
+            .ok_or_else(|| InferError::Message("F16 tensor byte length overflow".to_string()))?;
+        if bytes.len() != expected_bytes {
+            return Err(InferError::Message(format!(
+                "F16 tensor byte length mismatch: expected {expected_bytes}, got {}",
+                bytes.len()
+            )));
+        }
+        Ok(Self {
+            name: name.into(),
+            dimensions,
+            bytes,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn dimensions(&self) -> &[usize] {
+        &self.dimensions
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -160,6 +232,48 @@ pub fn linear_with_backend(
     backend.linear(input, weight, input_dim, output_dim)
 }
 
+pub fn matvec_f16_streaming(
+    input: &[f32],
+    weight_f16_le: &[u8],
+    input_dim: usize,
+    output_dim: usize,
+) -> Result<Vec<f32>> {
+    if input.len() != input_dim {
+        return Err(InferError::Message(format!(
+            "matvec_f16_streaming input length mismatch: expected {input_dim}, got {}",
+            input.len()
+        )));
+    }
+    let expected_weights = input_dim
+        .checked_mul(output_dim)
+        .and_then(|elements| elements.checked_mul(2))
+        .ok_or_else(|| InferError::Message("matvec_f16_streaming weight length overflow".into()))?;
+    if weight_f16_le.len() != expected_weights {
+        return Err(InferError::Message(format!(
+            "matvec_f16_streaming weight byte length mismatch: expected {expected_weights}, got {}",
+            weight_f16_le.len()
+        )));
+    }
+
+    let mut output = vec![0.0f32; output_dim];
+    let row_stride = input_dim
+        .checked_mul(2)
+        .ok_or_else(|| InferError::Message("matvec_f16_streaming row stride overflow".into()))?;
+    for (output_index, output_value) in output.iter_mut().enumerate() {
+        let row_start = output_index.checked_mul(row_stride).ok_or_else(|| {
+            InferError::Message("matvec_f16_streaming row offset overflow".into())
+        })?;
+        let row = &weight_f16_le[row_start..row_start + row_stride];
+        let mut sum = 0.0f32;
+        for (input_value, weight_bytes) in input.iter().zip(row.chunks_exact(2)) {
+            let weight = f16_bits_to_f32(u16::from_le_bytes([weight_bytes[0], weight_bytes[1]]));
+            sum += input_value * weight;
+        }
+        *output_value = sum;
+    }
+    Ok(output)
+}
+
 pub(crate) fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign = (u32::from(bits & 0x8000)) << 16;
     let exponent = (bits >> 10) & 0x1f;
@@ -242,6 +356,15 @@ mod tests {
     }
 
     #[test]
+    fn stores_f16_tensor_bytes_without_expanding_values() {
+        let bytes = f16_bytes(&[0x3c00, 0xc000, 0x3800, 0x4400]);
+        let tensor = F16TensorBytes::from_f16_le_bytes("toy", [2, 2], bytes.clone()).unwrap();
+        assert_eq!(tensor.name(), "toy");
+        assert_eq!(tensor.dimensions(), &[2, 2]);
+        assert_eq!(tensor.bytes(), bytes.as_slice());
+    }
+
+    #[test]
     fn rounds_f32_to_f16_values() {
         assert_eq!(round_f32_to_f16(1.0), 1.0);
         assert_eq!(round_f32_to_f16(-2.0), -2.0);
@@ -261,6 +384,20 @@ mod tests {
     #[test]
     fn linear_matches_ggml_output_input_weight_layout() {
         let output = linear(&[2.0, -1.0], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3).unwrap();
+        assert_close(&output, &[0.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn matvec_f16_streaming_matches_expanded_linear() {
+        let weight_f16 = f16_bytes(&[
+            f32_to_f16_bits(1.0),
+            f32_to_f16_bits(2.0),
+            f32_to_f16_bits(3.0),
+            f32_to_f16_bits(4.0),
+            f32_to_f16_bits(5.0),
+            f32_to_f16_bits(6.0),
+        ]);
+        let output = matvec_f16_streaming(&[2.0, -1.0], &weight_f16, 2, 3).unwrap();
         assert_close(&output, &[0.0, 2.0, 4.0]);
     }
 

@@ -175,9 +175,11 @@
 
 - [ ] `fish_s2_core::gguf::MappedTensorView`
   - Avoid eagerly expanding huge tensors such as `embeddings.weight` to f32.
+  - [x] Pre-slice: add file-backed `MappedTensorView` metadata handle with path, absolute offset, byte length, dimensions, type, and lazy byte reads/prefix reads.
   - Acceptance: logits path can run with streaming/mmap rows under bounded memory.
 - [ ] `fish_s2_infer::tensor::matvec_f16_streaming(input, f16_bytes, dims)`
   - Compute output-head logits without allocating the full f32 embedding matrix.
+  - [x] Pre-slice: add `F16TensorBytes` + `matvec_f16_streaming`, and route Slow-AR output-head logits through F16 byte streaming instead of a second expanded f32 `embeddings.weight` copy.
   - Acceptance: matches current F32-expanded output head stats.
 - [ ] `fish_s2_infer::tensor::{q8_0,q4_k_m}::matvec`
   - Match ggml quantized matmul semantics for non-F16 GGUF variants.
