@@ -18,6 +18,7 @@ struct E2eWavDump {
     max_new_tokens: u32,
     min_tokens_before_end: u32,
     seed: u64,
+    prompt_cols: i32,
     num_codebooks: u32,
     n_frames: u32,
     input_frames: u32,
@@ -42,6 +43,7 @@ struct GeneratedCodesDump {
     top_k: i32,
     max_new_tokens: u32,
     min_tokens_before_end: u32,
+    prompt_cols: i32,
     num_codebooks: u32,
     n_frames: u32,
     codes: Vec<i32>,
@@ -101,6 +103,7 @@ fn main() -> fish_s2_infer::Result<()> {
             top_k: args.top_k,
             max_new_tokens: args.max_new_tokens,
             min_tokens_before_end: args.min_tokens_before_end,
+            prompt_cols: prompt_cols_i32(result.prompt_cols)?,
             num_codebooks: result.codes.num_codebooks,
             n_frames: result.codes.n_frames,
             codes: result.codes.codes.clone(),
@@ -119,6 +122,7 @@ fn main() -> fish_s2_infer::Result<()> {
             max_new_tokens: args.max_new_tokens,
             min_tokens_before_end: args.min_tokens_before_end,
             seed: args.seed,
+            prompt_cols: prompt_cols_i32(result.prompt_cols)?,
             num_codebooks: result.codes.num_codebooks,
             n_frames: result.codes.n_frames,
             input_frames: result.waveform.input_frames,
@@ -329,6 +333,10 @@ fn max_abs(values: &[f32]) -> f64 {
         .iter()
         .map(|value| f64::from(value.abs()))
         .fold(0.0, f64::max)
+}
+
+fn prompt_cols_i32(prompt_cols: usize) -> fish_s2_infer::Result<i32> {
+    i32::try_from(prompt_cols).map_err(|_| InferError::Message("prompt_cols overflows i32".into()))
 }
 
 fn parse_int_err(err: std::num::ParseIntError) -> InferError {

@@ -95,6 +95,7 @@ impl RustSynthesisOptions {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RustSynthesisResult {
+    pub prompt_cols: usize,
     pub codes: GenerateCodesResult,
     pub waveform: CodecWaveformResult,
     pub wav_bytes: Vec<u8>,
@@ -162,6 +163,7 @@ impl RustPipeline {
                 graph: &self.graph,
             },
         )?;
+        let prompt_cols = prompt.cols;
         let mut rng = SeededRng::new(options.seed);
         let codes = generate_codes(
             &mut self.slow_state,
@@ -183,6 +185,7 @@ impl RustPipeline {
         )?;
         let wav_bytes = pcm_to_wav(&waveform.samples, waveform.sample_rate);
         Ok(RustSynthesisResult {
+            prompt_cols,
             codes,
             waveform,
             wav_bytes,
