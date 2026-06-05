@@ -95,6 +95,20 @@ those reference files at server load time.
 
 ## Validation
 
+MVP acceptance gate:
+
+```powershell
+.\scripts\verify_mvp.ps1
+```
+
+This writes `output\mvp_report.json` after checking model assets, formatting,
+unit tests, GUI build checks, strict clippy, and the RustPure server CLI. To run
+the slow real-model HTTP synthesis smoke as part of the same report:
+
+```powershell
+.\scripts\verify_mvp.ps1 -RunServerSmoke -MaxNewTokens 1
+```
+
 Common local gates:
 
 ```powershell

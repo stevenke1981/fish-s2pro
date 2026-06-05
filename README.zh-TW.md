@@ -94,6 +94,20 @@ codes。
 
 ## 驗證
 
+MVP 驗收 gate：
+
+```powershell
+.\scripts\verify_mvp.ps1
+```
+
+這會檢查模型檔、format、unit tests、GUI build check、strict clippy 與
+RustPure server CLI，並寫出 `output\mvp_report.json`。若要在同一份報告中
+加入較慢的真模型 HTTP 合成 smoke：
+
+```powershell
+.\scripts\verify_mvp.ps1 -RunServerSmoke -MaxNewTokens 1
+```
+
 常用本機 gate：
 
 ```powershell

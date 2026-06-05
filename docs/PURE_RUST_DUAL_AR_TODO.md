@@ -47,7 +47,7 @@
 | Pure-Rust CPU end-to-end WAV | 4-8+ weeks | Slow-AR + Fast-AR + codec decode + integration, likely slow but C++ free. |
 | Pure-Rust performant GPU end-to-end | 8-12+ weeks | Adds quantized kernels and CUDA/Vulkan/WGPU-style backend parity/perf work. |
 
-**Current pure-Rust state:** tokenizer, GGUF tensor reads, Slow-AR F16 layer math (prefill + decode with persistent KV), output-head logits, `fish_s2_infer::sampling`, `prompt::build_prompt`, `embed_slow_ar_time_major`, `SlowArState` (prefill/step/reset; `StepResult.hidden` = post-`norm.weight` like s2.cpp), `generate::{generate_semantic_tokens, generate_codes}`, and `fast_ar::{forward_codebook_prefix, generate_codebooks_for_semantic}` (4-layer causal prefix decode). CPU and CUDA Slow-AR logits/top-k parity pass. Greedy semantic token parity vs s2.cpp CPU passes (`dump_semantic_parity.ps1`). Greedy first-frame Fast-AR codebooks (all 10) pass (`dump_fast_ar_parity.ps1`). Full C++ `s2::generate` codebook-major output matches Rust `fish_s2_codes_dump` for greedy `hi`, 2 frames (`dump_generated_codes_parity.ps1`). **Codec decoder waveform** parity passes on greedy `hi` (`scripts/dump_waveform_parity.ps1`, `compare-waveform` + WAV envelope). `fish_s2_infer::pipeline::RustPipeline` now wires tokenizer + Slow-AR/Fast-AR generated codes + codec waveform decode into one library entrypoint, with `fish_s2_e2e_wav_dump` as the full-path smoke CLI. **Full-path E2E WAV parity now passes** for greedy `hi`, `MaxNewTokens=1` via `scripts/dump_e2e_wav_parity.ps1`: generated codes exact-match s2.cpp, waveform stats pass (`samples_l2_delta≈0.00034817`), and WAV envelope passes (`rms_delta≈0.00000751`). Quantizer decode stage (RVQ → post-module → upsample) parity passes on greedy `hi`.
+**Current pure-Rust state:** tokenizer, GGUF tensor reads, Slow-AR F16 layer math (prefill + decode with persistent KV), output-head logits, `fish_s2_infer::sampling`, `prompt::build_prompt`, `embed_slow_ar_time_major`, `SlowArState` (prefill/step/reset; `StepResult.hidden` = post-`norm.weight` like s2.cpp), `generate::{generate_semantic_tokens, generate_codes}`, and `fast_ar::{forward_codebook_prefix, generate_codebooks_for_semantic}` (4-layer causal prefix decode). CPU and CUDA Slow-AR logits/top-k parity pass. Greedy semantic token parity vs s2.cpp CPU passes (`dump_semantic_parity.ps1`). Greedy first-frame Fast-AR codebooks (all 10) pass (`dump_fast_ar_parity.ps1`). Full C++ `s2::generate` codebook-major output matches Rust `fish_s2_codes_dump` for greedy `hi`, 2 frames (`dump_generated_codes_parity.ps1`). **Codec decoder waveform** parity passes on greedy `hi` (`scripts/dump_waveform_parity.ps1`, `compare-waveform` + WAV envelope). `fish_s2_infer::pipeline::RustPipeline` now wires tokenizer + Slow-AR/Fast-AR generated codes + codec waveform decode into one library entrypoint, with `fish_s2_e2e_wav_dump` as the full-path smoke CLI. **Full-path E2E WAV parity now passes** for greedy `hi`, `MaxNewTokens=1` via `scripts/dump_e2e_wav_parity.ps1`: generated codes exact-match s2.cpp, waveform stats pass (`samples_l2_delta≈0.00034817`), and WAV envelope passes (`rms_delta≈0.00000751`). Quantizer decode stage (RVQ → post-module → upsample) parity passes on greedy `hi`. **MVP acceptance** is now scripted by `scripts/verify_mvp.ps1`, with a fast gate for handoff/CI and optional `-RunServerSmoke` for RustPure HTTP WAV synthesis.
 
 ### Package A — Slow-AR Logits and Sampling
 
@@ -204,6 +204,7 @@
   - [x] GUI server settings persist `server_backend` and `server_max_new_tokens`; the Server tab can choose `rust-pure`/`ffi`/`subprocess` and short smoke generation length.
   - [x] Server-level smoke passed: `fish_s2_server --backend rust-pure --max-new-tokens 1` + POST `/v1/tts` returns valid WAV (`44100 Hz`, mono, `0.04644s`, `rms≈0.188984`).
   - [x] `scripts/smoke_rust_server.ps1` automates release server startup, `/health`, `/v1/tts`, WAV metrics, and cleanup.
+  - [x] `scripts/verify_mvp.ps1` provides the MVP acceptance gate (`output/mvp_report.json`), with optional `-RunServerSmoke` to include the slow RustPure HTTP synthesis smoke.
   - Feature-gated backend selection with explicit logs.
   - Acceptance: GUI/server can choose RustPure when complete, FFI/subprocess fallback otherwise.
 
@@ -380,11 +381,11 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ## Definition of done (project-level)
 
-1. `cargo test` passes (unit + ignored parity with `FISH_S2_PARITY=1`).
+1. `scripts/verify_mvp.ps1` fast gate passes; optionally run `scripts/verify_mvp.ps1 -RunServerSmoke -MaxNewTokens 1` before release handoff.
 2. `cargo run -p fish_s2_infer --bin fish_s2_server` synthesizes WAV from `models/` **without** C++ binary or static lib.
 3. GUI “Rust 推理引擎” can launch `rust-pure` / `ffi` / `subprocess`, set short smoke `max_new_tokens`, and works on Windows with documented GPU setup.
 4. README states license + model download steps.
 
 ---
 
-*Last updated: 2026-06-05 — Codec/RVQ: reference prompt-code parity and MaxNewTokens=1 generated-codes parity now pass; next: extend generated parity length or resume codec/RVQ decode*
+*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; next product work is release packaging/perf cleanup, optional slow `-RunServerSmoke`, and Phase 8 GPU acceleration.*
