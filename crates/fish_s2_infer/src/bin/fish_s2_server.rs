@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use fish_s2_infer::spawn_server;
 use fish_s2_infer::{
-    default_tokenizer_path, models_dir, EngineBackend, EngineConfig, InferenceEngine,
+    default_tokenizer_path, models_dir, output_dir, project_root, server_workdir, EngineBackend,
+    EngineConfig, InferenceEngine,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,6 +57,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .parse()
                         .map_err(|_| "invalid --max-new-tokens")?,
                 );
+            }
+            "--print-paths" => {
+                print_paths();
+                return Ok(());
             }
             "--help" | "-h" => {
                 print_help();
@@ -138,11 +143,11 @@ fn auto_discover_pair() -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>
     let t = transformers
         .first()
         .cloned()
-        .ok_or("no *-transformer-only.gguf in models/")?;
+        .ok_or_else(|| format!("no *-transformer-only.gguf in {}", root.display()))?;
     let c = codecs
         .first()
         .cloned()
-        .ok_or("no *-codec-only.gguf in models/")?;
+        .ok_or_else(|| format!("no *-codec-only.gguf in {}", root.display()))?;
     Ok((t, c))
 }
 
@@ -151,10 +156,18 @@ fn print_help() {
         r#"fish_s2_server — in-process S2 Pro inference (Rust)
 
 Usage:
-  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend {}] [--max-new-tokens N]
+  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend {}] [--max-new-tokens N] [--print-paths]
 
 If paths are omitted, picks the first transformer-only + codec-only pair in models/.
 "#,
         EngineBackend::cli_values()
     );
+}
+
+fn print_paths() {
+    println!("project_root={}", project_root().display());
+    println!("models_dir={}", models_dir().display());
+    println!("tokenizer={}", default_tokenizer_path().display());
+    println!("output_dir={}", output_dir().display());
+    println!("server_workdir={}", server_workdir().display());
 }

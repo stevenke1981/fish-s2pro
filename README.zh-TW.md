@@ -61,6 +61,12 @@ cargo run --release -p fish_s2_infer --bin fish_s2_server -- `
   --port 8081
 ```
 
+Package/server exe 路徑診斷：
+
+```powershell
+.\dist\fish-s2pro-mvp\bin\fish_s2_server.exe --print-paths
+```
+
 POST 合成 WAV：
 
 ```powershell

@@ -353,6 +353,25 @@ if (-not $SkipServerHelp) {
     if ($helpText -notmatch "rust-pure\|ffi") {
         throw "server help does not advertise rust-pure|ffi"
     }
+
+    $oldFishRoot = $env:FISH_S2PRO_ROOT
+    Remove-Item Env:FISH_S2PRO_ROOT -ErrorAction SilentlyContinue
+    try {
+        $paths = & $server --print-paths 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "server --print-paths failed with exit code $LASTEXITCODE"
+        }
+        $pathText = $paths -join "`n"
+        $expectedRoot = [regex]::Escape($root)
+        $expectedModels = [regex]::Escape((Join-Path $root "models"))
+        if ($pathText -notmatch "project_root=$expectedRoot" -or $pathText -notmatch "models_dir=$expectedModels") {
+            throw "server --print-paths did not use package root"
+        }
+    } finally {
+        if ($null -ne $oldFishRoot) {
+            $env:FISH_S2PRO_ROOT = $oldFishRoot
+        }
+    }
 }
 
 Write-Host "package_verified=true"
@@ -381,6 +400,7 @@ This package contains the RustPure MVP binaries and support scripts.
 3. Or run scripts/run_server.ps1 -MaxNewTokens 1 -Port 8081.
 4. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
 5. Validate the package files with scripts/verify_package.ps1.
+6. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.
 
 The package intentionally does not include model weights or tokenizer assets.
 "@

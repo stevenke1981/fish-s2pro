@@ -62,6 +62,12 @@ cargo run --release -p fish_s2_infer --bin fish_s2_server -- `
   --port 8081
 ```
 
+Path diagnostics for a packaged/server exe:
+
+```powershell
+.\dist\fish-s2pro-mvp\bin\fish_s2_server.exe --print-paths
+```
+
 POST a WAV request:
 
 ```powershell

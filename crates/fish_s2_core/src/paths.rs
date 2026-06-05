@@ -9,23 +9,37 @@ pub fn project_root() -> PathBuf {
         }
     }
     if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-        for _ in 0..6 {
-            if dir.join("Cargo.toml").exists() && dir.join("models").exists() {
-                return dir;
-            }
-            if dir.join("Cargo.toml").exists() {
-                let has_crates = dir.join("crates").is_dir();
-                if has_crates {
-                    return dir;
-                }
-            }
-            if !dir.pop() {
-                break;
-            }
+        if let Some(root) =
+            discover_project_root_from(exe.parent().map(Path::to_path_buf).unwrap_or_default())
+        {
+            return root;
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn discover_project_root_from(mut dir: PathBuf) -> Option<PathBuf> {
+    for _ in 0..6 {
+        if dir.join("manifest.json").is_file()
+            && dir.join("models").is_dir()
+            && dir.join("bin").is_dir()
+        {
+            return Some(dir);
+        }
+        if dir.join("Cargo.toml").exists() && dir.join("models").exists() {
+            return Some(dir);
+        }
+        if dir.join("Cargo.toml").exists() {
+            let has_crates = dir.join("crates").is_dir();
+            if has_crates {
+                return Some(dir);
+            }
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
 }
 
 pub fn models_dir() -> PathBuf {
@@ -67,5 +81,20 @@ mod tests {
     fn default_tokenizer_lives_in_models() {
         let p = default_tokenizer_path();
         assert_eq!(p, models_dir().join("tokenizer.json"));
+    }
+
+    #[test]
+    fn discovers_portable_package_root_from_bin_dir() {
+        let root = std::env::temp_dir().join(format!("fish-s2pro-test-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("bin");
+        let models = root.join("models");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(root.join("manifest.json"), "{}").unwrap();
+
+        let discovered = discover_project_root_from(bin).unwrap();
+        assert_eq!(discovered, root);
+
+        let _ = std::fs::remove_dir_all(discovered);
     }
 }

@@ -49,7 +49,10 @@ pub use generate::{
     generate_codes, generate_fast_ar_first_frame, generate_semantic_tokens, FastArFirstFrameResult,
     GenerateCodesResult, GenerateParams, GenerateSemanticResult,
 };
-pub use paths::{default_tokenizer_path, ensure_project_dirs, models_dir, project_root};
+pub use paths::{
+    default_tokenizer_path, ensure_project_dirs, models_dir, output_dir, project_root,
+    server_workdir,
+};
 pub use pipeline::{RustPipeline, RustPipelineConfig, RustSynthesisOptions, RustSynthesisResult};
 pub use prompt::{
     build_prompt, load_prompt_codes, load_prompt_codes_file, transpose_to_time_major,
