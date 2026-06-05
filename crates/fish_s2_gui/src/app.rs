@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -25,16 +26,31 @@ enum Tab {
 }
 
 enum BackgroundMsg {
+    Status(String),
     TtsDone(Result<(Vec<u8>, PathBuf), String>),
     ConvertDone(Result<String, String>),
     ScanDone(ScannedModels),
     GgufInspect(Result<GgufSummary, String>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeRustEngineKey {
+    transformer: PathBuf,
+    codec: PathBuf,
+    workdir: PathBuf,
+    max_new_tokens: u32,
+}
+
+struct NativeRustEngineCache {
+    key: NativeRustEngineKey,
+    engine: Arc<Mutex<Option<InferenceEngine>>>,
+}
+
 pub struct FishS2App {
     config: AppConfig,
     tab: Tab,
     rust_server: Option<fish_s2_infer::ServerHandle>,
+    native_rust_engine: Option<NativeRustEngineCache>,
     scanned: ScannedModels,
     status_line: String,
     script: String,
@@ -66,6 +82,7 @@ impl FishS2App {
         Self {
             tab: Tab::Generate,
             rust_server: None,
+            native_rust_engine: None,
             scanned,
             status_line: "就緒。請將 GGUF 放入 models/，選擇模型對後啟動 Rust 推理伺服器。"
                 .to_string(),
@@ -96,9 +113,12 @@ impl FishS2App {
 
     fn poll_background(&mut self) {
         while let Ok(msg) = self.bg_rx.try_recv() {
-            self.busy = false;
             match msg {
+                BackgroundMsg::Status(line) => {
+                    self.status_line = line;
+                }
                 BackgroundMsg::TtsDone(Ok((bytes, path))) => {
+                    self.busy = false;
                     self.last_wav = Some(bytes.clone());
                     self.last_wav_path = Some(path.clone());
                     self.status_line = format!("已生成：{}", path.display());
@@ -108,13 +128,18 @@ impl FishS2App {
                         }
                     }
                 }
-                BackgroundMsg::TtsDone(Err(e)) => self.status_line = e,
+                BackgroundMsg::TtsDone(Err(e)) => {
+                    self.busy = false;
+                    self.status_line = e;
+                }
                 BackgroundMsg::ConvertDone(Ok(log)) => {
+                    self.busy = false;
                     self.convert_log = log;
                     self.status_line = "GGUF 轉換完成。正在重新掃描模型…".to_string();
                     self.rescan_models_async();
                 }
                 BackgroundMsg::ConvertDone(Err(e)) => {
+                    self.busy = false;
                     self.convert_log = e.clone();
                     self.status_line = e;
                 }
@@ -253,25 +278,45 @@ impl FishS2App {
 
         let voice = self.config.active_voice().cloned();
         self.busy = true;
-        self.status_line = "正在使用原生 Rust 引擎合成語音…".to_string();
+        self.status_line = "正在準備原生 Rust 引擎…".to_string();
         let output_dir = self.config.output_dir.clone();
-        let workdir = self.config.server_workdir.clone();
-        let max_new_tokens = self.config.server_max_new_tokens;
+        let key = NativeRustEngineKey {
+            transformer: pair.transformer.path.clone(),
+            codec: pair.codec.path.clone(),
+            workdir: self.config.server_workdir.clone(),
+            max_new_tokens: self.config.server_max_new_tokens,
+        };
+        let engine_slot = self.native_engine_slot(key.clone());
         let tx = self.bg_tx.clone();
         thread::spawn(move || {
             let result = (|| {
                 std::fs::create_dir_all(&output_dir)?;
-                let mut engine_cfg =
-                    EngineConfig::new(pair.transformer.path.clone(), pair.codec.path.clone())?;
-                engine_cfg.backend = EngineBackend::RustPure;
-                engine_cfg.workdir = workdir;
-                engine_cfg.generate_params.max_new_tokens = max_new_tokens;
-                let engine = InferenceEngine::load(engine_cfg)?;
+                let mut engine_guard = engine_slot.lock().map_err(|_| {
+                    fish_s2_infer::InferError::Message("原生 Rust 引擎鎖定失敗".into())
+                })?;
+                if engine_guard.is_none() {
+                    send_status(
+                        &tx,
+                        "首次使用原生 Rust：正在載入 GGUF 與 tokenizer，之後同模型會快很多…",
+                    );
+                    let mut engine_cfg =
+                        EngineConfig::new(pair.transformer.path.clone(), pair.codec.path.clone())?;
+                    engine_cfg.backend = EngineBackend::RustPure;
+                    engine_cfg.workdir = key.workdir.clone();
+                    engine_cfg.generate_params.max_new_tokens = key.max_new_tokens;
+                    *engine_guard = Some(InferenceEngine::load(engine_cfg)?);
+                    send_status(&tx, "原生 Rust 引擎已載入，正在合成語音…");
+                } else {
+                    send_status(&tx, "正在使用已載入的原生 Rust 引擎合成語音…");
+                }
                 let request = SynthesisRequest {
                     text,
                     reference_wav: voice.as_ref().map(|v| v.reference_wav.clone()),
                     reference_text: voice.as_ref().map(|v| v.reference_text.clone()),
                 };
+                let engine = engine_guard.as_ref().ok_or_else(|| {
+                    fish_s2_infer::InferError::Message("原生 Rust 引擎尚未載入".into())
+                })?;
                 let bytes = engine.synthesize_wav(&request)?;
                 let filename = format!("tts_{}.wav", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
                 let path = output_dir.join(filename);
@@ -281,6 +326,23 @@ impl FishS2App {
             .map_err(|e| e.to_string());
             let _ = tx.send(BackgroundMsg::TtsDone(result));
         });
+    }
+
+    fn native_engine_slot(
+        &mut self,
+        key: NativeRustEngineKey,
+    ) -> Arc<Mutex<Option<InferenceEngine>>> {
+        if let Some(cache) = &self.native_rust_engine {
+            if cache.key == key {
+                return cache.engine.clone();
+            }
+        }
+        let engine = Arc::new(Mutex::new(None));
+        self.native_rust_engine = Some(NativeRustEngineCache {
+            key,
+            engine: engine.clone(),
+        });
+        engine
     }
 
     fn run_server_tts(&mut self) {
@@ -846,4 +908,8 @@ fn open_in_explorer(path: &std::path::Path) {
             .arg(path.parent().unwrap_or(path))
             .spawn();
     }
+}
+
+fn send_status(tx: &Sender<BackgroundMsg>, line: impl Into<String>) {
+    let _ = tx.send(BackgroundMsg::Status(line.into()));
 }
