@@ -5,6 +5,7 @@ mod error;
 pub mod fast_ar;
 mod generate;
 mod paths;
+mod pipeline;
 pub mod prompt;
 pub mod registry;
 pub mod sampling;
@@ -49,6 +50,7 @@ pub use generate::{
     GenerateCodesResult, GenerateParams, GenerateSemanticResult,
 };
 pub use paths::{default_tokenizer_path, ensure_project_dirs, models_dir, project_root};
+pub use pipeline::{RustPipeline, RustPipelineConfig, RustSynthesisOptions, RustSynthesisResult};
 pub use prompt::{
     build_prompt, load_prompt_codes, load_prompt_codes_file, transpose_to_time_major,
     PromptBuildOptions, PromptCodes, PromptCodesFile, PromptTensor,
