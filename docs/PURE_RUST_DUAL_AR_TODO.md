@@ -201,6 +201,7 @@
   - [x] `InferenceEngine::load` owns a `Mutex<RustPipeline>` for RustPure, optional FFI native engine for `cpp-engine`, or subprocess fallback.
   - [x] RustPure load-time reference conditioning: if `workdir/reference.wav` + `reference.txt` exist, `InferenceEngine::load` encodes/caches prompt codes for `/v1/tts` requests without changing the HTTP API.
   - [x] `fish_s2_server --backend rust-pure|ffi|subprocess [--max-new-tokens N]` selects the backend explicitly.
+  - [x] GUI server settings persist `server_backend` and `server_max_new_tokens`; the Server tab can choose `rust-pure`/`ffi`/`subprocess` and short smoke generation length.
   - [x] Server-level smoke passed: `fish_s2_server --backend rust-pure --max-new-tokens 1` + POST `/v1/tts` returns valid WAV (`44100 Hz`, mono, `0.04644s`, `rms≈0.188984`).
   - [x] `scripts/smoke_rust_server.ps1` automates release server startup, `/health`, `/v1/tts`, WAV metrics, and cleanup.
   - Feature-gated backend selection with explicit logs.
@@ -381,7 +382,7 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 1. `cargo test` passes (unit + ignored parity with `FISH_S2_PARITY=1`).
 2. `cargo run -p fish_s2_infer --bin fish_s2_server` synthesizes WAV from `models/` **without** C++ binary or static lib.
-3. GUI “Rust 推理引擎” works on Windows with documented GPU setup.
+3. GUI “Rust 推理引擎” can launch `rust-pure` / `ffi` / `subprocess`, set short smoke `max_new_tokens`, and works on Windows with documented GPU setup.
 4. README states license + model download steps.
 
 ---

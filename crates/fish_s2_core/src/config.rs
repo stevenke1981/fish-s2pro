@@ -13,6 +13,10 @@ pub struct AppConfig {
     pub output_dir: PathBuf,
     pub server_workdir: PathBuf,
     pub server_port: u16,
+    #[serde(default = "default_server_backend")]
+    pub server_backend: String,
+    #[serde(default = "default_server_max_new_tokens")]
+    pub server_max_new_tokens: u32,
     pub vulkan_device: i32,
     pub codec_vulkan_device: i32,
     pub use_rust_engine: bool,
@@ -33,6 +37,8 @@ impl Default for AppConfig {
             output_dir: output_dir(),
             server_workdir: server_workdir(),
             server_port: 8081,
+            server_backend: default_server_backend(),
+            server_max_new_tokens: default_server_max_new_tokens(),
             vulkan_device: 0,
             codec_vulkan_device: 0,
             use_rust_engine: true,
@@ -47,6 +53,14 @@ impl Default for AppConfig {
     }
 }
 
+fn default_server_backend() -> String {
+    "rust-pure".to_string()
+}
+
+fn default_server_max_new_tokens() -> u32 {
+    1
+}
+
 impl AppConfig {
     pub fn config_path() -> PathBuf {
         project_root().join("config.json")
@@ -58,6 +72,12 @@ impl AppConfig {
             if let Ok(mut cfg) = serde_json::from_str::<Self>(&raw) {
                 if cfg.models_dir.as_os_str().is_empty() {
                     cfg.models_dir = models_dir();
+                }
+                if cfg.server_backend.trim().is_empty() {
+                    cfg.server_backend = default_server_backend();
+                }
+                if cfg.server_max_new_tokens == 0 {
+                    cfg.server_max_new_tokens = default_server_max_new_tokens();
                 }
                 return cfg;
             }

@@ -9,7 +9,7 @@ use fish_s2_core::{
     ConvertPlan, GgufSummary, ModelPair, ScannedModels, TtsClient, TtsRequest, VoiceProfile,
     CONTROL_TAGS,
 };
-use fish_s2_infer::{EngineConfig, InferenceEngine};
+use fish_s2_infer::{EngineBackend, EngineConfig, InferenceEngine};
 use uuid::Uuid;
 
 use crate::audio::AudioPlayer;
@@ -184,6 +184,14 @@ impl FishS2App {
                 }
             };
         engine_cfg.workdir = self.config.server_workdir.clone();
+        match EngineBackend::parse(&self.config.server_backend) {
+            Ok(backend) => engine_cfg.backend = backend,
+            Err(e) => {
+                self.status_line = e.to_string();
+                return;
+            }
+        }
+        engine_cfg.generate_params.max_new_tokens = self.config.server_max_new_tokens;
         engine_cfg.vulkan_device = self.config.vulkan_device;
         engine_cfg.codec_vulkan_device = self.config.codec_vulkan_device;
 
@@ -701,6 +709,26 @@ impl FishS2App {
         ui.horizontal(|ui| {
             ui.label("連接埠");
             ui.add(egui::DragValue::new(&mut self.config.server_port).range(1024..=65535));
+            ui.label("後端");
+            egui::ComboBox::from_id_salt("server_backend")
+                .selected_text(&self.config.server_backend)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.config.server_backend,
+                        "rust-pure".to_string(),
+                        "rust-pure",
+                    );
+                    ui.selectable_value(&mut self.config.server_backend, "ffi".to_string(), "ffi");
+                    ui.selectable_value(
+                        &mut self.config.server_backend,
+                        "subprocess".to_string(),
+                        "subprocess",
+                    );
+                });
+            ui.label("生成幀數");
+            ui.add(egui::DragValue::new(&mut self.config.server_max_new_tokens).range(1..=2048));
+        });
+        ui.horizontal(|ui| {
             ui.label("Vulkan 裝置");
             ui.add(egui::DragValue::new(&mut self.config.vulkan_device));
             ui.label("Codec Vulkan");
