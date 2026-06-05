@@ -45,7 +45,7 @@ extern "C" S2EngineHandle *s2_engine_create(const S2EngineConfig *cfg, char *err
     handle->base.tokenizer_path = cfg->tokenizer_path;
     handle->base.vulkan_device = use_cuda ? -1 : cfg->vulkan_device;
     handle->base.codec_vulkan_device = use_cuda ? -1 : cfg->codec_vulkan_device;
-    handle->base.gen.max_new_tokens = 2048;
+    handle->base.gen.max_new_tokens = cfg->max_new_tokens > 0 ? cfg->max_new_tokens : 512;
     handle->base.gen.temperature = 0.7f;
     handle->base.gen.top_p = 0.8f;
     handle->base.gen.top_k = 30;

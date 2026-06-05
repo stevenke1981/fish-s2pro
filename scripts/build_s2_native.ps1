@@ -76,10 +76,20 @@ function Patch-S2CppCudaHooks {
     $pipelineCpp = Join-Path $SourceRoot "src\s2_pipeline.cpp"
     if (Test-Path -LiteralPath $pipelineCpp) {
         $raw = Get-Content -Raw -LiteralPath $pipelineCpp
+        $changed = $false
         $old = 'Codec loaded on CPU (fallback).'
         if ($raw.Contains($old)) {
             Write-Host "Patching s2_pipeline.cpp fallback backend log..."
             $raw = $raw.Replace($old, 'Codec loaded on fallback backend.')
+            $changed = $true
+        }
+        $textLog = 'std::cout << "Text: " << params.text << std::endl;'
+        if ($raw.Contains($textLog)) {
+            Write-Host "Patching s2_pipeline.cpp UTF-8 text log..."
+            $raw = $raw.Replace($textLog, 'std::cout << "Text bytes: " << params.text.size() << std::endl;')
+            $changed = $true
+        }
+        if ($changed) {
             [System.IO.File]::WriteAllText($pipelineCpp, $raw, [System.Text.UTF8Encoding]::new($false))
         }
     }

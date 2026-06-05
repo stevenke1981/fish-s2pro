@@ -18,6 +18,7 @@ typedef struct S2EngineConfig {
     int32_t codec_vulkan_device;
     int32_t use_cuda;
     int32_t cuda_device;
+    int32_t max_new_tokens;
 } S2EngineConfig;
 
 S2EngineHandle *s2_engine_create(const S2EngineConfig *cfg, char *err, size_t err_cap);

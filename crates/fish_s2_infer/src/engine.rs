@@ -387,6 +387,7 @@ mod native {
         codec_vulkan_device: i32,
         use_cuda: i32,
         cuda_device: i32,
+        max_new_tokens: i32,
     }
 
     unsafe extern "C" {
@@ -418,6 +419,8 @@ mod native {
             let codec = cstr(&config.codec_gguf)?;
             let tokenizer = cstr(&config.tokenizer_path)?;
             let workdir = cstr(&config.workdir)?;
+            let max_new_tokens = i32::try_from(config.generate_params.max_new_tokens)
+                .map_err(|_| InferError::Message("max_new_tokens overflows i32".into()))?;
             let mut err_buf = vec![0i8; 512];
             let cfg = S2EngineConfig {
                 model_path: model.as_ptr(),
@@ -428,6 +431,7 @@ mod native {
                 codec_vulkan_device: config.codec_vulkan_device,
                 use_cuda: i32::from(config.backend.uses_cuda()),
                 cuda_device: config.cuda_device,
+                max_new_tokens,
             };
             let handle = unsafe { s2_engine_create(&cfg, err_buf.as_mut_ptr(), err_buf.len()) };
             if handle.is_null() {
