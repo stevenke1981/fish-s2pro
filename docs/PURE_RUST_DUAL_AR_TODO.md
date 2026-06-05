@@ -216,6 +216,7 @@
   - `scripts/check_cuda_compat.ps1 -RunBuildSmoke` can run the existing s2.cpp CUDA Slow-AR dump build smoke from the source tree.
 - [ ] `fish_s2_infer::backend::MatmulBackend` trait
   - CPU reference backend first; GPU backend later.
+  - [x] Pre-slice: add `MatmulBackend` + `CpuMatmulBackend`, and route `tensor::linear` through the backend abstraction without changing CPU numerics.
   - Acceptance: Slow/Fast/codec ops call through backend abstraction where practical.
 - [ ] CUDA/Vulkan/WGPU spike for `matvec`, RMSNorm, RoPE, attention
   - Start with output-head matvec and layer FFN matvec as highest-cost ops.

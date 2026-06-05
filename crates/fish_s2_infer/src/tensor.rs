@@ -1,5 +1,6 @@
 use fish_s2_core::gguf::{GgmlType, GgufFile};
 
+use crate::backend::{CpuMatmulBackend, MatmulBackend};
 use crate::error::{InferError, Result};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,30 +141,23 @@ pub fn linear(
     input_dim: usize,
     output_dim: usize,
 ) -> Result<Vec<f32>> {
-    if input.len() != input_dim {
-        return Err(InferError::Message(format!(
-            "linear input length mismatch: expected {input_dim}, got {}",
-            input.len()
-        )));
-    }
-    let expected_weights = input_dim
-        .checked_mul(output_dim)
-        .ok_or_else(|| InferError::Message("linear weight length overflow".to_string()))?;
-    if weight.len() != expected_weights {
-        return Err(InferError::Message(format!(
-            "linear weight length mismatch: expected {expected_weights}, got {}",
-            weight.len()
-        )));
-    }
+    linear_with_backend(
+        &CpuMatmulBackend::new(),
+        input,
+        weight,
+        input_dim,
+        output_dim,
+    )
+}
 
-    let mut output = vec![0.0f32; output_dim];
-    for output_index in 0..output_dim {
-        let row = &weight[output_index * input_dim..(output_index + 1) * input_dim];
-        for input_index in 0..input_dim {
-            output[output_index] += input[input_index] * row[input_index];
-        }
-    }
-    Ok(output)
+pub fn linear_with_backend(
+    backend: &impl MatmulBackend,
+    input: &[f32],
+    weight: &[f32],
+    input_dim: usize,
+    output_dim: usize,
+) -> Result<Vec<f32>> {
+    backend.linear(input, weight, input_dim, output_dim)
 }
 
 pub(crate) fn f16_bits_to_f32(bits: u16) -> f32 {
