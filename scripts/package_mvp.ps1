@@ -461,7 +461,7 @@ This package contains the RustPure MVP binaries and optional cpp-engine/ffi-cuda
 2. Run bin/fish-s2pro$exeSuffix for the GUI.
 3. Or run scripts/run_server.ps1 -MaxNewTokens 1 -Port 8081.
 4. For CUDA FFI builds, run scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0.
-5. Experimental codec CUDA is opt-in: scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0 -CodecCuda.
+5. Codec CUDA diagnostics can be requested with scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0 -CodecCuda, but codec decode stays on CPU unless FISH_S2_CODEC_CUDA_UNSAFE=1 is set.
 6. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
 7. Validate the package files with scripts/verify_package.ps1.
 8. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.

@@ -45,9 +45,34 @@ function Patch-S2CppCudaHooks {
                 1
             )
         }
-        if (-not $raw.Contains("[Codec] CUDA backend initialized")) {
+        $cudaHook = @'
+#ifdef GGML_USE_CUDA
+    if (!impl_->backend) {
+        if (const char * cuda_device_env = std::getenv("FISH_S2_CODEC_CUDA_DEVICE")) {
+            const char * unsafe_codec_cuda = std::getenv("FISH_S2_CODEC_CUDA_UNSAFE");
+            if (!unsafe_codec_cuda || std::strcmp(unsafe_codec_cuda, "1") != 0) {
+                std::cout << "[Codec] CUDA requested for codec decode, but it is guarded off because GGML CUDA IM2COL is unstable for this codec graph. Using CPU codec backend. Set FISH_S2_CODEC_CUDA_UNSAFE=1 only for diagnostics." << std::endl;
+            } else {
+                const int cuda_device = std::atoi(cuda_device_env);
+                impl_->backend = ggml_backend_cuda_init(cuda_device);
+                if (impl_->backend) {
+                    std::cout << "[Codec] CUDA backend initialized on device " << cuda_device << " (unsafe diagnostics)." << std::endl;
+                } else {
+                    std::cerr << "[Codec] CUDA init failed for device " << cuda_device << ", falling back to CPU." << std::endl;
+                }
+            }
+        }
+    }
+#endif
+'@
+        if (-not $raw.Contains("FISH_S2_CODEC_CUDA_UNSAFE") -and -not $raw.Contains("[Codec] CUDA backend initialized")) {
             Write-Host "Patching s2_codec.cpp CUDA backend hook..."
-            $cudaHook = @'
+            $raw = $raw.Replace(
+                "    if (!impl_->backend) impl_->backend = ggml_backend_cpu_init();",
+                $cudaHook + "    if (!impl_->backend) impl_->backend = ggml_backend_cpu_init();"
+            )
+        }
+        $oldCudaHook = @'
 #ifdef GGML_USE_CUDA
     if (!impl_->backend) {
         if (const char * cuda_device_env = std::getenv("FISH_S2_CODEC_CUDA_DEVICE")) {
@@ -62,10 +87,9 @@ function Patch-S2CppCudaHooks {
     }
 #endif
 '@
-            $raw = $raw.Replace(
-                "    if (!impl_->backend) impl_->backend = ggml_backend_cpu_init();",
-                $cudaHook + "    if (!impl_->backend) impl_->backend = ggml_backend_cpu_init();"
-            )
+        if ($raw.Contains($oldCudaHook)) {
+            Write-Host "Patching s2_codec.cpp guarded codec CUDA hook..."
+            $raw = $raw.Replace($oldCudaHook, $cudaHook)
         }
         $oldCodecCudaEnv = 'if (const char * cuda_device_env = std::getenv("FISH_S2_CUDA_DEVICE"))'
         if ($raw.Contains($oldCodecCudaEnv)) {
@@ -93,6 +117,9 @@ function Patch-S2CppCudaHooks {
         }
         if (-not $raw.Contains("#include <cstdlib>")) {
             $raw = $raw.Replace("#include <stdexcept>", "#include <stdexcept>`n#include <cstdlib>")
+        }
+        if (-not $raw.Contains("#include <cstring>")) {
+            $raw = $raw.Replace("#include <cstdio>", "#include <cstring>`n#include <cstdio>")
         }
         [System.IO.File]::WriteAllText($codecCpp, $raw, [System.Text.UTF8Encoding]::new($false))
     }

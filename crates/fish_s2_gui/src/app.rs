@@ -796,7 +796,7 @@ impl FishS2App {
                 }
                 ui.separator();
                 if ui
-                    .checkbox(&mut self.config.codec_cuda, "Codec CUDA（實驗）")
+                    .checkbox(&mut self.config.codec_cuda, "Codec CUDA 診斷")
                     .changed()
                 {
                     self.native_rust_engine = None;
@@ -866,7 +866,7 @@ impl FishS2App {
         if self.config.codec_cuda {
             ui.colored_label(
                 egui::Color32::from_rgb(255, 202, 120),
-                "Codec CUDA 已開啟：會設定 FISH_S2_CODEC_CUDA_DEVICE；若遇到 IM2COL CUDA error，請關閉此選項使用穩定 CPU codec decode。",
+                "Codec CUDA 診斷已請求，但一般生成會被 C++ guard 改用 CPU codec backend，避免 GGML CUDA IM2COL crash。",
             );
         }
         ui.add(
@@ -1305,7 +1305,7 @@ impl FishS2App {
                 self.native_rust_engine = None;
             }
             if ui
-                .checkbox(&mut self.config.codec_cuda, "Codec CUDA（實驗）")
+                .checkbox(&mut self.config.codec_cuda, "Codec CUDA 診斷")
                 .changed()
             {
                 self.native_rust_engine = None;
@@ -1325,7 +1325,7 @@ impl FishS2App {
             if self.config.codec_cuda {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 202, 120),
-                    "Codec CUDA 仍屬實驗路徑，長音訊 decode 可能觸發上游 ggml IM2COL CUDA error。",
+                    "目前 codec CUDA 會被 guard 為 CPU fallback；只有設定 FISH_S2_CODEC_CUDA_UNSAFE=1 才會強制進入不穩定路徑。",
                 );
             }
         });
@@ -1690,7 +1690,9 @@ fn apply_tts_style(text: &str, style_prefix: &str) -> String {
 fn backend_device_line(backend: EngineBackend, cuda_device: i32, codec_cuda: bool) -> String {
     if backend.uses_cuda() {
         if codec_cuda {
-            format!("CUDA：device {cuda_device}（Transformer + Codec；codec 路徑為實驗開關）")
+            format!(
+                "CUDA：device {cuda_device}（Transformer 使用 GGML CUDA；codec CUDA 已 guard 為 CPU fallback）"
+            )
         } else {
             format!(
                 "CUDA：device {cuda_device}（Transformer 使用 GGML CUDA；codec 使用 CPU fallback，避開 CUDA IM2COL）"

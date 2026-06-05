@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "unused".to_string()
         },
         if cfg.backend.uses_cuda() && cfg.codec_cuda {
-            "enabled (experimental)"
+            "requested (guarded; CPU fallback unless FISH_S2_CODEC_CUDA_UNSAFE=1)"
         } else {
             "off"
         },
