@@ -391,7 +391,7 @@ impl FishS2App {
         );
         append_log_line(
             &mut self.synthesis_log,
-            &format!("max_new_tokens：{}", self.config.server_max_new_tokens),
+            &format!("文字預覽：{}", text_preview(&text)),
         );
         let backend = match EngineBackend::parse(&self.config.server_backend) {
             Ok(backend) => backend,
@@ -400,6 +400,15 @@ impl FishS2App {
                 return;
             }
         };
+        let (effective_max_new_tokens, token_note) =
+            effective_tts_max_new_tokens(self.config.server_max_new_tokens, &text, backend);
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!("max_new_tokens：{effective_max_new_tokens}"),
+        );
+        if let Some(note) = token_note {
+            append_log_line(&mut self.synthesis_log, &note);
+        }
         append_log_line(
             &mut self.synthesis_log,
             &format!("Backend：{}", backend.as_str()),
@@ -421,7 +430,7 @@ impl FishS2App {
             codec: pair.codec.path.clone(),
             workdir: self.config.server_workdir.clone(),
             backend: backend.as_str().to_string(),
-            max_new_tokens: self.config.server_max_new_tokens,
+            max_new_tokens: effective_max_new_tokens,
             cuda_device: self.config.cuda_device,
             vulkan_device: self.config.vulkan_device,
             codec_vulkan_device: self.config.codec_vulkan_device,
@@ -698,6 +707,14 @@ impl FishS2App {
             ui.colored_label(
                 egui::Color32::YELLOW,
                 "目前 token=1 只會產生極短 smoke WAV，通常聽起來像沒有聲音。",
+            );
+        } else if self.config.server_max_new_tokens < MIN_AUDIBLE_TTS_TOKENS {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!(
+                    "目前 token={} 偏短；按生成語音時，CUDA/FFI 會依文字自動提高，避免輸出太短。",
+                    self.config.server_max_new_tokens
+                ),
             );
         }
         ui.add(
@@ -1241,10 +1258,52 @@ fn format_elapsed(duration: Duration) -> String {
 
 fn backend_device_line(backend: EngineBackend, cuda_device: i32) -> String {
     if backend.uses_cuda() {
-        format!("CUDA：device {cuda_device}")
+        format!("CUDA：device {cuda_device}（GGML CUDA active；Vulkan device -1 為預期）")
     } else {
         "CUDA：未使用".to_string()
     }
+}
+
+const MIN_AUDIBLE_TTS_TOKENS: u32 = 128;
+const MAX_AUTO_TTS_TOKENS: u32 = 1024;
+
+fn effective_tts_max_new_tokens(
+    configured: u32,
+    text: &str,
+    backend: EngineBackend,
+) -> (u32, Option<String>) {
+    if !backend.is_ffi() {
+        return (configured, None);
+    }
+    let recommended = recommended_tts_max_new_tokens(text);
+    if configured >= recommended {
+        return (configured, None);
+    }
+    (
+        recommended,
+        Some(format!(
+            "提示：設定的 max_new_tokens={configured} 對這段文字偏短，已自動提高到 {recommended}，避免產生幾乎無聲的短 WAV。"
+        )),
+    )
+}
+
+fn recommended_tts_max_new_tokens(text: &str) -> u32 {
+    let content_chars = text.chars().filter(|c| !c.is_whitespace()).count() as u32;
+    if content_chars == 0 {
+        return MIN_AUDIBLE_TTS_TOKENS;
+    }
+    content_chars
+        .saturating_mul(4)
+        .clamp(MIN_AUDIBLE_TTS_TOKENS, MAX_AUTO_TTS_TOKENS)
+}
+
+fn text_preview(text: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 80;
+    let mut preview: String = text.chars().take(MAX_PREVIEW_CHARS).collect();
+    if text.chars().count() > MAX_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    preview.replace(['\r', '\n', '\t'], " ")
 }
 
 fn maybe_promote_cuda_backend(config: &mut AppConfig) -> Option<String> {
@@ -1383,6 +1442,24 @@ mod tests {
         let warning = wav_warning(&analysis, 1).unwrap();
         assert!(warning.contains("太短"));
         assert!(warning.contains("max_new_tokens=1"));
+    }
+
+    #[test]
+    fn ffi_generation_raises_too_short_token_limit_for_text() {
+        let (tokens, note) = effective_tts_max_new_tokens(
+            20,
+            "你好，這是使用 Fish Audio S2 Pro 生成的語音。",
+            EngineBackend::FfiCuda,
+        );
+        assert_eq!(tokens, MIN_AUDIBLE_TTS_TOKENS);
+        assert!(note.unwrap().contains("自動提高"));
+    }
+
+    #[test]
+    fn rust_pure_keeps_configured_debug_token_limit() {
+        let (tokens, note) = effective_tts_max_new_tokens(4, "短測試", EngineBackend::RustPure);
+        assert_eq!(tokens, 4);
+        assert!(note.is_none());
     }
 
     fn test_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {

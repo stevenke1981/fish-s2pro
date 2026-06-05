@@ -83,6 +83,26 @@ function Patch-S2CppCudaHooks {
             $raw = $raw.Replace($old, 'Codec loaded on fallback backend.')
             $changed = $true
         }
+        $vulkanFallbackLog = 'Pipeline warning: codec failed on GPU, falling back to CPU.'
+        if ($raw.Contains($vulkanFallbackLog)) {
+            Write-Host "Patching s2_pipeline.cpp Vulkan fallback wording..."
+            $raw = $raw.Replace($vulkanFallbackLog, 'Pipeline warning: codec Vulkan path unavailable; using configured fallback backend.')
+            $changed = $true
+        }
+        $wordingPatches = @(
+            @('GPU assignment: model -> GPU ', 'Vulkan device assignment: model -> '),
+            @(', codec -> GPU ', ', codec -> '),
+            @('Loading model on GPU ', 'Loading model with Vulkan device '),
+            @('Model loaded on GPU ', 'Model loaded with Vulkan device '),
+            @('Loading codec on GPU ', 'Loading codec with Vulkan device ')
+        )
+        foreach ($patch in $wordingPatches) {
+            if ($raw.Contains($patch[0])) {
+                Write-Host "Patching s2_pipeline.cpp Vulkan/CUDA device wording..."
+                $raw = $raw.Replace($patch[0], $patch[1])
+                $changed = $true
+            }
+        }
         $textLog = 'std::cout << "Text: " << params.text << std::endl;'
         if ($raw.Contains($textLog)) {
             Write-Host "Patching s2_pipeline.cpp UTF-8 text log..."
