@@ -73,19 +73,24 @@ pub struct FishS2App {
 
 impl FishS2App {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let config = AppConfig::load();
+        let mut config = AppConfig::load();
         let _ = config.ensure_dirs();
         let (bg_tx, bg_rx) = mpsc::channel();
         let scanned = ScannedModels::scan_dir(&config.models_dir, 4).unwrap_or_default();
+        let selected_label = config
+            .ensure_active_model_pair(&scanned.pairs)
+            .map(|pair| pair.label.clone());
+        let _ = config.save();
         let audio = AudioPlayer::new();
         let script = config.last_script.clone();
+        let status_line =
+            model_scan_status(&config.models_dir, &scanned, selected_label.as_deref());
         Self {
             tab: Tab::Generate,
             rust_server: None,
             native_rust_engine: None,
             scanned,
-            status_line: "就緒。請將 GGUF 放入 models/，選擇模型對後啟動 Rust 推理伺服器。"
-                .to_string(),
+            status_line,
             script,
             script_cursor: 0,
             selected_gguf: None,
@@ -144,12 +149,7 @@ impl FishS2App {
                     self.status_line = e;
                 }
                 BackgroundMsg::ScanDone(models) => {
-                    self.scanned = models;
-                    self.status_line = format!(
-                        "找到 {} 個 GGUF、{} 組可用模型對",
-                        self.scanned.entries.len(),
-                        self.scanned.pairs.len()
-                    );
+                    self.adopt_scanned_models(models);
                 }
                 BackgroundMsg::GgufInspect(Ok(summary)) => {
                     self.gguf_detail = Some(summary);
@@ -176,12 +176,43 @@ impl FishS2App {
         self.config.active_model_pair(&self.scanned.pairs)
     }
 
+    fn ensure_active_pair(&mut self) -> Option<ModelPair> {
+        let previous_id = self.config.active_model_pair_id.clone();
+        let selected = self
+            .config
+            .ensure_active_model_pair(&self.scanned.pairs)
+            .cloned();
+        if previous_id != self.config.active_model_pair_id {
+            self.native_rust_engine = None;
+            let _ = self.config.save();
+        }
+        selected
+    }
+
+    fn adopt_scanned_models(&mut self, models: ScannedModels) {
+        let previous_id = self.config.active_model_pair_id.clone();
+        self.scanned = models;
+        let selected_label = self
+            .config
+            .ensure_active_model_pair(&self.scanned.pairs)
+            .map(|pair| pair.label.clone());
+        if previous_id != self.config.active_model_pair_id {
+            self.native_rust_engine = None;
+            let _ = self.config.save();
+        }
+        self.status_line = model_scan_status(
+            &self.config.models_dir,
+            &self.scanned,
+            selected_label.as_deref(),
+        );
+    }
+
     fn start_server(&mut self) {
-        let pair = match self.active_pair() {
-            Some(p) => p.clone(),
+        let pair = match self.ensure_active_pair() {
+            Some(p) => p,
             None => {
                 self.status_line =
-                    "請先在「模型」分頁選擇一組 transformer + codec GGUF".to_string();
+                    missing_model_pair_message(&self.config.models_dir, &self.scanned);
                 return;
             }
         };
@@ -258,11 +289,11 @@ impl FishS2App {
     }
 
     fn run_native_rust_tts(&mut self) {
-        let pair = match self.active_pair() {
-            Some(p) => p.clone(),
+        let pair = match self.ensure_active_pair() {
+            Some(p) => p,
             None => {
                 self.status_line =
-                    "請先在「模型」分頁選擇一組 transformer + codec GGUF".to_string();
+                    missing_model_pair_message(&self.config.models_dir, &self.scanned);
                 return;
             }
         };
@@ -704,6 +735,9 @@ impl FishS2App {
                     }
                 }
                 if let Some(id) = pick_pair {
+                    if self.config.active_model_pair_id.as_deref() != Some(id.as_str()) {
+                        self.native_rust_engine = None;
+                    }
                     self.config.active_model_pair_id = Some(id);
                     self.persist();
                 }
@@ -908,6 +942,35 @@ fn open_in_explorer(path: &std::path::Path) {
             .arg(path.parent().unwrap_or(path))
             .spawn();
     }
+}
+
+fn model_scan_status(
+    models_dir: &std::path::Path,
+    scanned: &ScannedModels,
+    selected_label: Option<&str>,
+) -> String {
+    if let Some(label) = selected_label {
+        return format!(
+            "找到 {} 個 GGUF、{} 組可用模型對；已自動選用：{}",
+            scanned.entries.len(),
+            scanned.pairs.len(),
+            label
+        );
+    }
+    missing_model_pair_message(models_dir, scanned)
+}
+
+fn missing_model_pair_message(models_dir: &std::path::Path, scanned: &ScannedModels) -> String {
+    if scanned.entries.is_empty() {
+        return format!(
+            "找不到 GGUF 模型。請將 transformer-only + codec-only GGUF 放入 {}，或執行 scripts\\download_models.ps1 -IncludeGguf -Quant f16。",
+            models_dir.display()
+        );
+    }
+    format!(
+        "已找到 {} 個 GGUF，但沒有可用的 transformer + codec 配對。請確認檔名包含 transformer-only 與 codec-only，或重新下載 s2-pro GGUF pair。",
+        scanned.entries.len()
+    )
 }
 
 fn send_status(tx: &Sender<BackgroundMsg>, line: impl Into<String>) {

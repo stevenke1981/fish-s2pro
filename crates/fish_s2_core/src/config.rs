@@ -119,6 +119,22 @@ impl AppConfig {
         pairs.iter().find(|p| &p.id == id)
     }
 
+    pub fn ensure_active_model_pair<'a>(
+        &mut self,
+        pairs: &'a [ModelPair],
+    ) -> Option<&'a ModelPair> {
+        let selected_index = self
+            .active_model_pair_id
+            .as_deref()
+            .and_then(|id| pairs.iter().position(|pair| pair.id == id))
+            .or_else(|| (!pairs.is_empty()).then_some(0))?;
+        let pair = &pairs[selected_index];
+        if self.active_model_pair_id.as_deref() != Some(pair.id.as_str()) {
+            self.active_model_pair_id = Some(pair.id.clone());
+        }
+        Some(pair)
+    }
+
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         fs::create_dir_all(&self.models_dir)?;
         fs::create_dir_all(&self.output_dir)?;
@@ -132,4 +148,70 @@ pub fn copy_reference_files(workdir: &Path, wav: &Path, text: &str) -> std::io::
     fs::copy(wav, workdir.join("reference.wav"))?;
     fs::write(workdir.join("reference.txt"), text)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ModelEntry, ModelKind};
+
+    #[test]
+    fn selects_first_model_pair_when_no_active_id_exists() {
+        let mut config = AppConfig {
+            active_model_pair_id: None,
+            ..Default::default()
+        };
+        let pairs = model_pairs();
+        let selected = config.ensure_active_model_pair(&pairs).unwrap();
+        assert_eq!(selected.id, "pair-a");
+        assert_eq!(config.active_model_pair_id.as_deref(), Some("pair-a"));
+    }
+
+    #[test]
+    fn replaces_stale_active_model_pair_id() {
+        let mut config = AppConfig {
+            active_model_pair_id: Some("missing-pair".to_string()),
+            ..Default::default()
+        };
+        let pairs = model_pairs();
+        let selected = config.ensure_active_model_pair(&pairs).unwrap();
+        assert_eq!(selected.id, "pair-a");
+        assert_eq!(config.active_model_pair_id.as_deref(), Some("pair-a"));
+    }
+
+    #[test]
+    fn keeps_existing_active_model_pair_id() {
+        let mut config = AppConfig {
+            active_model_pair_id: Some("pair-b".to_string()),
+            ..Default::default()
+        };
+        let pairs = model_pairs();
+        let selected = config.ensure_active_model_pair(&pairs).unwrap();
+        assert_eq!(selected.id, "pair-b");
+        assert_eq!(config.active_model_pair_id.as_deref(), Some("pair-b"));
+    }
+
+    fn model_pairs() -> Vec<ModelPair> {
+        vec![
+            model_pair("pair-a", "a-transformer.gguf", "a-codec.gguf"),
+            model_pair("pair-b", "b-transformer.gguf", "b-codec.gguf"),
+        ]
+    }
+
+    fn model_pair(id: &str, transformer: &str, codec: &str) -> ModelPair {
+        ModelPair {
+            id: id.to_string(),
+            label: id.to_string(),
+            transformer: model_entry(transformer, ModelKind::TransformerOnly),
+            codec: model_entry(codec, ModelKind::CodecOnly),
+        }
+    }
+
+    fn model_entry(path: &str, kind: ModelKind) -> ModelEntry {
+        ModelEntry {
+            path: PathBuf::from(path),
+            kind,
+            summary: None,
+        }
+    }
 }
