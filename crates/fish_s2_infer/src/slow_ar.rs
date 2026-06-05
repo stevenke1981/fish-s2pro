@@ -1,14 +1,16 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use fish_s2_core::gguf::GgufFile;
 
 use crate::attention::{apply_rope_normal, SlowArKvCache};
+use crate::backend::{CpuMatmulBackend, MatmulBackend};
 use crate::error::{InferError, Result};
 use crate::registry::{
     ArGraphSpec, DualArGraphSpec, TransformerTensorRegistry, SLOW_CONTEXT_LENGTH,
 };
 use crate::tensor::{
-    embedding_lookup_rows, linear, matvec_f16_streaming, rms_norm, F16TensorBytes, F16TensorView,
+    embedding_lookup_rows, matvec_f16_streaming, rms_norm, F16TensorBytes, F16TensorView,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -242,6 +244,85 @@ pub struct SlowArStepResult {
     pub logits: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SlowArDecodeProfile {
+    pub rms_norm: Duration,
+    pub linear: Duration,
+    pub gqa_attention: Duration,
+    pub rope: Duration,
+    pub kv_write: Duration,
+    pub swiglu: Duration,
+    pub output_head: Duration,
+}
+
+impl SlowArDecodeProfile {
+    pub fn total(self) -> Duration {
+        self.rms_norm
+            + self.linear
+            + self.gqa_attention
+            + self.rope
+            + self.kv_write
+            + self.swiglu
+            + self.output_head
+    }
+
+    pub fn top_ops(self, limit: usize) -> Vec<(&'static str, Duration)> {
+        let mut items = vec![
+            ("linear", self.linear),
+            ("rms_norm", self.rms_norm),
+            ("gqa_attention", self.gqa_attention),
+            ("rope", self.rope),
+            ("kv_write", self.kv_write),
+            ("swiglu", self.swiglu),
+            ("output_head", self.output_head),
+        ];
+        items.sort_by(|a, b| b.1.cmp(&a.1));
+        items.truncate(limit);
+        items
+    }
+
+    fn add(&mut self, op: SlowArProfileOp, elapsed: Duration) {
+        match op {
+            SlowArProfileOp::RmsNorm => self.rms_norm += elapsed,
+            SlowArProfileOp::Linear => self.linear += elapsed,
+            SlowArProfileOp::GqaAttention => self.gqa_attention += elapsed,
+            SlowArProfileOp::Rope => self.rope += elapsed,
+            SlowArProfileOp::KvWrite => self.kv_write += elapsed,
+            SlowArProfileOp::Swiglu => self.swiglu += elapsed,
+            SlowArProfileOp::OutputHead => self.output_head += elapsed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SlowArProfileOp {
+    RmsNorm,
+    Linear,
+    GqaAttention,
+    Rope,
+    KvWrite,
+    Swiglu,
+    OutputHead,
+}
+
+pub struct SlowArDecodeBackendContext<'a, B: MatmulBackend> {
+    pub backend: &'a B,
+    pub profile: Option<&'a mut SlowArDecodeProfile>,
+}
+
+impl<'a, B: MatmulBackend> SlowArDecodeBackendContext<'a, B> {
+    pub fn new(backend: &'a B, profile: Option<&'a mut SlowArDecodeProfile>) -> Self {
+        Self { backend, profile }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlowArDecodeLayerRequest {
+    pub layer_start: usize,
+    pub layer_count: usize,
+    pub position: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlowArEmbeddingWeights {
     pub semantic: F16TensorView,
@@ -283,6 +364,8 @@ pub struct SlowArState {
     embeddings: SlowArEmbeddingWeights,
     output_head: SlowArOutputHeadF16Weights,
     cache: SlowArKvCache,
+    backend: CpuMatmulBackend,
+    decode_profile: SlowArDecodeProfile,
     n_past: usize,
     max_seq_len: usize,
 }
@@ -308,6 +391,8 @@ impl SlowArState {
             embeddings,
             output_head,
             cache,
+            backend: CpuMatmulBackend::new(),
+            decode_profile: SlowArDecodeProfile::default(),
             n_past: 0,
             max_seq_len,
         })
@@ -323,6 +408,14 @@ impl SlowArState {
 
     pub fn n_past(&self) -> usize {
         self.n_past
+    }
+
+    pub fn decode_profile(&self) -> SlowArDecodeProfile {
+        self.decode_profile
+    }
+
+    pub fn reset_decode_profile(&mut self) {
+        self.decode_profile = SlowArDecodeProfile::default();
     }
 
     pub fn reset(&mut self) {
@@ -367,20 +460,26 @@ impl SlowArState {
             )));
         }
 
+        self.reset_decode_profile();
         let hidden_tokens = embed_slow_ar_time_major(flat_tokens, &self.graph, &self.embeddings)?;
         let start_position = self.n_past;
         let outputs = if n_tokens == 1 {
             let hidden = hidden_tokens
                 .first()
                 .ok_or_else(|| InferError::Message("missing embedded token".into()))?;
-            let block = forward_slow_ar_block_decode_layers(
+            let mut context =
+                SlowArDecodeBackendContext::new(&self.backend, Some(&mut self.decode_profile));
+            let block = forward_slow_ar_block_decode_layers_with_backend(
                 &self.gguf,
                 &self.registry,
-                0,
-                self.registry.slow_layer_count(),
+                SlowArDecodeLayerRequest {
+                    layer_start: 0,
+                    layer_count: self.registry.slow_layer_count(),
+                    position: start_position,
+                },
                 hidden,
                 &mut self.cache,
-                start_position,
+                &mut context,
             )?;
             vec![block]
         } else {
@@ -401,9 +500,12 @@ impl SlowArState {
             .hidden
             .clone();
         // Match s2.cpp eval_cached: StepResult.hidden is last-token output after weights_.norm.
+        let output_head_start = Instant::now();
         let logits_out = self
             .output_head
             .forward_logits(&last_hidden, self.shape.rms_norm_eps)?;
+        self.decode_profile
+            .add(SlowArProfileOp::OutputHead, output_head_start.elapsed());
         self.n_past = checked_add(self.n_past, n_tokens, "n_past")?;
         Ok(SlowArStepResult {
             hidden: logits_out.normalized,
@@ -508,9 +610,31 @@ impl SlowArLayerSkeleton<'_> {
         layer: usize,
         position: usize,
     ) -> Result<SlowArLayerForwardOutput> {
-        let prepared = self.prepare_decode_token(hidden, position)?;
-        cache.write_token(layer, position, &prepared.key, &prepared.value)?;
-        self.finish_decode_token(
+        let backend = CpuMatmulBackend::new();
+        let mut context = SlowArDecodeBackendContext::new(&backend, None);
+        self.forward_decode_token_with_backend(&mut context, hidden, cache, layer, position)
+    }
+
+    pub fn forward_feed_forward(&self, hidden: &[f32]) -> Result<SlowArLayerFeedForwardOutput> {
+        let backend = CpuMatmulBackend::new();
+        let mut context = SlowArDecodeBackendContext::new(&backend, None);
+        self.forward_feed_forward_with_backend(&mut context, hidden)
+    }
+
+    pub fn forward_decode_token_with_backend<B: MatmulBackend>(
+        &self,
+        context: &mut SlowArDecodeBackendContext<'_, B>,
+        hidden: &[f32],
+        cache: &mut SlowArKvCache,
+        layer: usize,
+        position: usize,
+    ) -> Result<SlowArLayerForwardOutput> {
+        let prepared = self.prepare_decode_token_with_backend(context, hidden, position)?;
+        profile_decode_op(&mut context.profile, SlowArProfileOp::KvWrite, || {
+            cache.write_token(layer, position, &prepared.key, &prepared.value)
+        })?;
+        self.finish_decode_token_with_backend(
+            context,
             hidden,
             prepared,
             cache,
@@ -519,28 +643,44 @@ impl SlowArLayerSkeleton<'_> {
         )
     }
 
-    pub fn forward_feed_forward(&self, hidden: &[f32]) -> Result<SlowArLayerFeedForwardOutput> {
+    pub fn forward_feed_forward_with_backend<B: MatmulBackend>(
+        &self,
+        context: &mut SlowArDecodeBackendContext<'_, B>,
+        hidden: &[f32],
+    ) -> Result<SlowArLayerFeedForwardOutput> {
         self.validate(hidden)?;
-        let normalized = rms_norm(hidden, self.ffn_norm_weight, self.shape.rms_norm_eps)?;
-        let gate = linear(
-            &normalized,
-            self.feed_forward_w1_weight,
-            self.shape.hidden_size,
-            self.shape.feed_forward_size,
-        )?;
-        let up = linear(
-            &normalized,
-            self.feed_forward_w3_weight,
-            self.shape.hidden_size,
-            self.shape.feed_forward_size,
-        )?;
-        let activated = swiglu_split(&gate, &up)?;
-        let projected = linear(
-            &activated,
-            self.feed_forward_w2_weight,
-            self.shape.feed_forward_size,
-            self.shape.hidden_size,
-        )?;
+        let normalized = profile_decode_op(&mut context.profile, SlowArProfileOp::RmsNorm, || {
+            context
+                .backend
+                .rms_norm(hidden, self.ffn_norm_weight, self.shape.rms_norm_eps)
+        })?;
+        let gate = profile_decode_op(&mut context.profile, SlowArProfileOp::Linear, || {
+            context.backend.linear(
+                &normalized,
+                self.feed_forward_w1_weight,
+                self.shape.hidden_size,
+                self.shape.feed_forward_size,
+            )
+        })?;
+        let up = profile_decode_op(&mut context.profile, SlowArProfileOp::Linear, || {
+            context.backend.linear(
+                &normalized,
+                self.feed_forward_w3_weight,
+                self.shape.hidden_size,
+                self.shape.feed_forward_size,
+            )
+        })?;
+        let activated = profile_decode_op(&mut context.profile, SlowArProfileOp::Swiglu, || {
+            swiglu_split(&gate, &up)
+        })?;
+        let projected = profile_decode_op(&mut context.profile, SlowArProfileOp::Linear, || {
+            context.backend.linear(
+                &activated,
+                self.feed_forward_w2_weight,
+                self.shape.feed_forward_size,
+                self.shape.hidden_size,
+            )
+        })?;
         let hidden = hidden
             .iter()
             .zip(&projected)
@@ -561,46 +701,71 @@ impl SlowArLayerSkeleton<'_> {
         hidden: &[f32],
         position: usize,
     ) -> Result<SlowArLayerPreparedToken> {
+        let backend = CpuMatmulBackend::new();
+        let mut context = SlowArDecodeBackendContext::new(&backend, None);
+        self.prepare_decode_token_with_backend(&mut context, hidden, position)
+    }
+
+    fn prepare_decode_token_with_backend<B: MatmulBackend>(
+        &self,
+        context: &mut SlowArDecodeBackendContext<'_, B>,
+        hidden: &[f32],
+        position: usize,
+    ) -> Result<SlowArLayerPreparedToken> {
         self.validate(hidden)?;
 
-        let normalized = rms_norm(hidden, self.attention_norm_weight, self.shape.rms_norm_eps)?;
-        let qkv = linear(
-            &normalized,
-            self.wqkv_weight,
-            self.shape.hidden_size,
-            self.shape.wqkv_out()?,
-        )?;
+        let normalized = profile_decode_op(&mut context.profile, SlowArProfileOp::RmsNorm, || {
+            context
+                .backend
+                .rms_norm(hidden, self.attention_norm_weight, self.shape.rms_norm_eps)
+        })?;
+        let qkv = profile_decode_op(&mut context.profile, SlowArProfileOp::Linear, || {
+            context.backend.linear(
+                &normalized,
+                self.wqkv_weight,
+                self.shape.hidden_size,
+                self.shape.wqkv_out()?,
+            )
+        })?;
         let q_size = self.shape.q_size()?;
         let kv_size = self.shape.kv_size()?;
         let (query_raw, rest) = qkv.split_at(q_size);
         let (key_raw, value_raw) = rest.split_at(kv_size);
 
-        let mut query = rms_norm_heads(
-            query_raw,
-            self.q_norm_weight,
-            self.shape.head_dim,
-            self.shape.rms_norm_eps,
-        )?;
-        let mut key = rms_norm_heads(
-            key_raw,
-            self.k_norm_weight,
-            self.shape.head_dim,
-            self.shape.rms_norm_eps,
-        )?;
+        let mut query = profile_decode_op(&mut context.profile, SlowArProfileOp::RmsNorm, || {
+            context.backend.rms_norm_heads(
+                query_raw,
+                self.q_norm_weight,
+                self.shape.head_dim,
+                self.shape.rms_norm_eps,
+            )
+        })?;
+        let mut key = profile_decode_op(&mut context.profile, SlowArProfileOp::RmsNorm, || {
+            context.backend.rms_norm_heads(
+                key_raw,
+                self.k_norm_weight,
+                self.shape.head_dim,
+                self.shape.rms_norm_eps,
+            )
+        })?;
         let value = value_raw.to_vec();
 
-        apply_rope_normal(
-            &mut query,
-            self.shape.head_dim,
-            position,
-            self.shape.rope_base,
-        )?;
-        apply_rope_normal(
-            &mut key,
-            self.shape.head_dim,
-            position,
-            self.shape.rope_base,
-        )?;
+        profile_decode_op(&mut context.profile, SlowArProfileOp::Rope, || {
+            apply_rope_normal(
+                &mut query,
+                self.shape.head_dim,
+                position,
+                self.shape.rope_base,
+            )
+        })?;
+        profile_decode_op(&mut context.profile, SlowArProfileOp::Rope, || {
+            apply_rope_normal(
+                &mut key,
+                self.shape.head_dim,
+                position,
+                self.shape.rope_base,
+            )
+        })?;
 
         Ok(SlowArLayerPreparedToken {
             normalized,
@@ -618,19 +783,46 @@ impl SlowArLayerSkeleton<'_> {
         layer: usize,
         visible_token_count: usize,
     ) -> Result<SlowArLayerForwardOutput> {
-        let attention = cache.decode_attention(
+        let backend = CpuMatmulBackend::new();
+        let mut context = SlowArDecodeBackendContext::new(&backend, None);
+        self.finish_decode_token_with_backend(
+            &mut context,
+            hidden,
+            prepared,
+            cache,
             layer,
             visible_token_count,
-            &prepared.query,
-            self.shape.head_count,
-            self.shape.attn_scale(),
-        )?;
-        let projected = linear(
-            &attention,
-            self.output_weight,
-            self.shape.q_size()?,
-            self.shape.hidden_size,
-        )?;
+        )
+    }
+
+    fn finish_decode_token_with_backend<B: MatmulBackend>(
+        &self,
+        context: &mut SlowArDecodeBackendContext<'_, B>,
+        hidden: &[f32],
+        prepared: SlowArLayerPreparedToken,
+        cache: &SlowArKvCache,
+        layer: usize,
+        visible_token_count: usize,
+    ) -> Result<SlowArLayerForwardOutput> {
+        let attention =
+            profile_decode_op(&mut context.profile, SlowArProfileOp::GqaAttention, || {
+                cache.decode_attention_with_backend(
+                    context.backend,
+                    layer,
+                    visible_token_count,
+                    &prepared.query,
+                    self.shape.head_count,
+                    self.shape.attn_scale(),
+                )
+            })?;
+        let projected = profile_decode_op(&mut context.profile, SlowArProfileOp::Linear, || {
+            context.backend.linear(
+                &attention,
+                self.output_weight,
+                self.shape.q_size()?,
+                self.shape.hidden_size,
+            )
+        })?;
         let hidden = hidden
             .iter()
             .zip(&projected)
@@ -710,6 +902,19 @@ impl SlowArLayerSkeleton<'_> {
         )?;
         Ok(())
     }
+}
+
+fn profile_decode_op<T>(
+    profile: &mut Option<&mut SlowArDecodeProfile>,
+    op: SlowArProfileOp,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let start = Instant::now();
+    let result = f();
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.add(op, start.elapsed());
+    }
+    result
 }
 
 impl SlowArOutputHeadF16Weights {
@@ -923,15 +1128,42 @@ pub fn forward_slow_ar_block_decode_layers(
     cache: &mut SlowArKvCache,
     position: usize,
 ) -> Result<SlowArLayerBlockOutput> {
-    if layer_count == 0 {
+    let backend = CpuMatmulBackend::new();
+    let mut profile = SlowArDecodeProfile::default();
+    let mut context = SlowArDecodeBackendContext::new(&backend, Some(&mut profile));
+    forward_slow_ar_block_decode_layers_with_backend(
+        gguf,
+        registry,
+        SlowArDecodeLayerRequest {
+            layer_start,
+            layer_count,
+            position,
+        },
+        hidden,
+        cache,
+        &mut context,
+    )
+}
+
+pub fn forward_slow_ar_block_decode_layers_with_backend<B: MatmulBackend>(
+    gguf: &GgufFile,
+    registry: &TransformerTensorRegistry,
+    request: SlowArDecodeLayerRequest,
+    hidden: &[f32],
+    cache: &mut SlowArKvCache,
+    context: &mut SlowArDecodeBackendContext<'_, B>,
+) -> Result<SlowArLayerBlockOutput> {
+    if request.layer_count == 0 {
         return Err(InferError::Message(
             "layer_count must be greater than zero".into(),
         ));
     }
-    let layer_end = checked_add(layer_start, layer_count, "layer_end")?;
+    let layer_end = checked_add(request.layer_start, request.layer_count, "layer_end")?;
     if layer_end > registry.slow_layer_count() {
         return Err(InferError::Message(format!(
-            "slow layer range out of bounds: start={layer_start} count={layer_count} available={}",
+            "slow layer range out of bounds: start={} count={} available={}",
+            request.layer_start,
+            request.layer_count,
             registry.slow_layer_count()
         )));
     }
@@ -940,17 +1172,18 @@ pub fn forward_slow_ar_block_decode_layers(
     let shape = SlowArLayerShape::from_ar_graph_spec(&graph.slow)?;
     let mut current_hidden = hidden.to_vec();
     let mut last_output = None;
-    for layer in layer_start..layer_end {
+    for layer in request.layer_start..layer_end {
         let weights = SlowArLayerF16Weights::from_gguf_layer(gguf, registry, layer)?;
-        let attention = weights.skeleton(shape).forward_decode_token(
+        let attention = weights.skeleton(shape).forward_decode_token_with_backend(
+            context,
             &current_hidden,
             cache,
             layer,
-            position,
+            request.position,
         )?;
         let feed_forward = weights
             .skeleton(shape)
-            .forward_feed_forward(&attention.hidden)?;
+            .forward_feed_forward_with_backend(context, &attention.hidden)?;
         let hidden = feed_forward.hidden.clone();
         last_output = Some(SlowArLayerBlockOutput {
             attention,
@@ -964,20 +1197,6 @@ pub fn forward_slow_ar_block_decode_layers(
             .clone();
     }
     last_output.ok_or_else(|| InferError::Message("decode produced no layer outputs".into()))
-}
-
-fn rms_norm_heads(input: &[f32], weight: &[f32], head_dim: usize, eps: f32) -> Result<Vec<f32>> {
-    if !input.len().is_multiple_of(head_dim) {
-        return Err(InferError::Message(format!(
-            "head RMSNorm input length {} is not a multiple of head_dim {head_dim}",
-            input.len()
-        )));
-    }
-    let mut output = Vec::with_capacity(input.len());
-    for head in input.chunks_exact(head_dim) {
-        output.extend(rms_norm(head, weight, eps)?);
-    }
-    Ok(output)
 }
 
 fn swiglu_split(gate: &[f32], up: &[f32]) -> Result<Vec<f32>> {
@@ -1114,6 +1333,109 @@ mod tests {
         assert_close(&actual.attention, &[3.0, 0.0, 3.0, 0.0]);
         assert_close(&actual.projected, &[3.0, 6.0, 0.0, 0.0]);
         assert_close(&actual.hidden, &[4.0, 6.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn slow_ar_decode_hot_ops_route_through_backend_trait() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingBackend {
+            linear: AtomicUsize,
+            rms_norm: AtomicUsize,
+            gqa_attention: AtomicUsize,
+        }
+
+        impl MatmulBackend for CountingBackend {
+            fn name(&self) -> &'static str {
+                "counting"
+            }
+
+            fn linear(
+                &self,
+                input: &[f32],
+                weight: &[f32],
+                input_dim: usize,
+                output_dim: usize,
+            ) -> Result<Vec<f32>> {
+                self.linear.fetch_add(1, Ordering::Relaxed);
+                CpuMatmulBackend::new().linear(input, weight, input_dim, output_dim)
+            }
+
+            fn rms_norm(&self, input: &[f32], weight: &[f32], eps: f32) -> Result<Vec<f32>> {
+                self.rms_norm.fetch_add(1, Ordering::Relaxed);
+                CpuMatmulBackend::new().rms_norm(input, weight, eps)
+            }
+
+            fn rms_norm_heads(
+                &self,
+                input: &[f32],
+                weight: &[f32],
+                head_dim: usize,
+                eps: f32,
+            ) -> Result<Vec<f32>> {
+                self.rms_norm.fetch_add(1, Ordering::Relaxed);
+                CpuMatmulBackend::new().rms_norm_heads(input, weight, head_dim, eps)
+            }
+
+            fn gqa_decode_attention(
+                &self,
+                query_heads: &[f32],
+                key_tokens: &[f32],
+                value_tokens: &[f32],
+                shape: crate::attention::GqaAttentionShape,
+            ) -> Result<Vec<f32>> {
+                self.gqa_attention.fetch_add(1, Ordering::Relaxed);
+                CpuMatmulBackend::new().gqa_decode_attention(
+                    query_heads,
+                    key_tokens,
+                    value_tokens,
+                    shape,
+                )
+            }
+        }
+
+        let shape = toy_shape();
+        let spec = KvCacheSpec {
+            ggml_type: GgmlType::F16,
+            head_dim: shape.head_dim as u32,
+            head_count_kv: shape.head_count_kv as u32,
+            block_count: 1,
+        };
+        let mut cache = SlowArKvCache::new(spec, 1).unwrap();
+        let weights = toy_attention_weights(shape);
+        let layer = weights.skeleton(shape);
+        let backend = CountingBackend {
+            linear: AtomicUsize::new(0),
+            rms_norm: AtomicUsize::new(0),
+            gqa_attention: AtomicUsize::new(0),
+        };
+        let mut profile = SlowArDecodeProfile::default();
+
+        let actual = {
+            let mut context = SlowArDecodeBackendContext::new(&backend, Some(&mut profile));
+            layer
+                .forward_decode_token_with_backend(
+                    &mut context,
+                    &[1.0, 0.0, 0.0, 0.0],
+                    &mut cache,
+                    0,
+                    0,
+                )
+                .unwrap()
+        };
+
+        assert_close(&actual.hidden, &[4.0, 6.0, 0.0, 0.0]);
+        assert_eq!(backend.linear.load(Ordering::Relaxed), 2);
+        assert_eq!(backend.rms_norm.load(Ordering::Relaxed), 3);
+        assert_eq!(backend.gqa_attention.load(Ordering::Relaxed), 1);
+        let names = profile
+            .top_ops(7)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"linear"));
+        assert!(names.contains(&"rms_norm"));
+        assert!(names.contains(&"gqa_attention"));
     }
 
     #[test]

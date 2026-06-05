@@ -1,9 +1,15 @@
 use std::path::PathBuf;
+#[cfg(feature = "http-client")]
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "http-client")]
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::error::{CoreError, Result};
+#[cfg(feature = "http-client")]
+use crate::error::CoreError;
+#[cfg(feature = "http-client")]
+use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TtsRequest {
@@ -18,16 +24,19 @@ pub struct TtsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(feature = "http-client")]
 struct TtsApiError {
     error: Option<String>,
     message: Option<String>,
 }
 
+#[cfg(feature = "http-client")]
 pub struct TtsClient {
     base_url: String,
     client: reqwest::blocking::Client,
 }
 
+#[cfg(feature = "http-client")]
 impl TtsClient {
     pub fn new(port: u16) -> Self {
         let client = reqwest::blocking::Client::builder()

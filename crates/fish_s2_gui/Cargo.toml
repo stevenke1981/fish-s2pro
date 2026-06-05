@@ -11,7 +11,10 @@ path = "src/main.rs"
 
 [features]
 default = []
+candle-backend = ["fish_s2_infer/candle-backend"]
+candle-cuda = ["fish_s2_infer/candle-cuda"]
 cpp-engine = ["fish_s2_infer/cpp-engine"]
+http-client = ["fish_s2_core/http-client"]
 legacy-s2-exe = ["fish_s2_core/legacy-s2-exe", "fish_s2_infer/legacy-s2-exe"]
 
 [dependencies]

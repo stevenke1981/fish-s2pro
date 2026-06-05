@@ -5,6 +5,7 @@ pub enum CoreError {
     #[error("{0}")]
     Message(String),
     #[error("HTTP error: {0}")]
+    #[cfg(feature = "http-client")]
     Http(#[from] reqwest::Error),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use fish_s2_core::{
     checkpoint_codec_path, copy_reference_files, resolve_export_script, validate_pair, AppConfig,
-    ConvertPlan, GgufSummary, ModelPair, ScannedModels, TtsClient, TtsRequest, VoiceProfile,
-    CONTROL_TAGS,
+    ConvertPlan, GgufSummary, ModelPair, ScannedModels, VoiceProfile, CONTROL_TAGS,
 };
+#[cfg(feature = "http-client")]
+use fish_s2_core::{TtsClient, TtsRequest};
 use fish_s2_infer::{EngineBackend, EngineConfig, InferenceEngine, SynthesisRequest};
 use uuid::Uuid;
 
@@ -631,36 +632,49 @@ impl FishS2App {
             );
         }
         self.status_line = "正在合成語音…".to_string();
-        let port = self.config.server_port;
-        let output_dir = self.config.output_dir.clone();
-        let tx = self.bg_tx.clone();
-        thread::spawn(move || {
-            let start = Instant::now();
-            let client = TtsClient::new(port);
-            let req = TtsRequest {
-                text,
-                format: "wav".to_string(),
-            };
-            let filename = format!("tts_{}.wav", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
-            let path = output_dir.join(filename);
-            send_debug(&tx, &format!("HTTP：POST /v1/tts，輸出 {}", path.display()));
-            let result = client
-                .synthesize_to_file(&req, path)
-                .map(|r| {
-                    let path = r.saved_path.unwrap_or_default();
-                    send_debug(
-                        &tx,
-                        &format!(
-                            "HTTP：完成，用時 {}，WAV {} bytes",
-                            format_elapsed(start.elapsed()),
-                            r.wav_bytes.len()
-                        ),
-                    );
-                    (r.wav_bytes, path)
-                })
-                .map_err(|e| e.to_string());
-            let _ = tx.send(BackgroundMsg::TtsDone(result));
-        });
+        #[cfg(not(feature = "http-client"))]
+        {
+            self.status_line =
+                "此 build 未編入 HTTP client；請使用原生 Rust 直接生成，或以 --features http-client 重新編譯。"
+                    .to_string();
+            append_log_line(
+                &mut self.synthesis_log,
+                "HTTP：未編入 http-client feature，已略過 /v1/tts 呼叫。",
+            );
+        }
+        #[cfg(feature = "http-client")]
+        {
+            let port = self.config.server_port;
+            let output_dir = self.config.output_dir.clone();
+            let tx = self.bg_tx.clone();
+            thread::spawn(move || {
+                let start = Instant::now();
+                let client = TtsClient::new(port);
+                let req = TtsRequest {
+                    text,
+                    format: "wav".to_string(),
+                };
+                let filename = format!("tts_{}.wav", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+                let path = output_dir.join(filename);
+                send_debug(&tx, &format!("HTTP：POST /v1/tts，輸出 {}", path.display()));
+                let result = client
+                    .synthesize_to_file(&req, path)
+                    .map(|r| {
+                        let path = r.saved_path.unwrap_or_default();
+                        send_debug(
+                            &tx,
+                            &format!(
+                                "HTTP：完成，用時 {}，WAV {} bytes",
+                                format_elapsed(start.elapsed()),
+                                r.wav_bytes.len()
+                            ),
+                        );
+                        (r.wav_bytes, path)
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(BackgroundMsg::TtsDone(result));
+            });
+        }
     }
 
     fn run_convert(&mut self) {
@@ -1340,12 +1354,21 @@ impl FishS2App {
                 self.status_line = "伺服器已停止".to_string();
             }
             if ui.button("測試連線").clicked() {
-                let client = TtsClient::new(self.config.server_port);
-                self.status_line = if client.health_check() {
-                    "HTTP 端點可連線".to_string()
-                } else {
-                    "無法連線（伺服器可能仍在載入模型）".to_string()
-                };
+                #[cfg(feature = "http-client")]
+                {
+                    let client = TtsClient::new(self.config.server_port);
+                    self.status_line = if client.health_check() {
+                        "HTTP 端點可連線".to_string()
+                    } else {
+                        "無法連線（伺服器可能仍在載入模型）".to_string()
+                    };
+                }
+                #[cfg(not(feature = "http-client"))]
+                {
+                    self.status_line =
+                        "此 build 未編入 HTTP client；測試連線需要 --features http-client。"
+                            .to_string();
+                }
             }
         });
 

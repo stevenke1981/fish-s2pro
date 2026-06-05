@@ -1,9 +1,10 @@
 param(
-    [string] $DistDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "dist\fish-s2pro-mvp"),
+    [string] $DistDir = "",
     [switch] $SkipBuild,
     [switch] $RunVerify,
     [switch] $Archive,
-    [string] $Features = ""
+    [string] $Features = "",
+    [string] $ArtifactSuffix = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,8 +12,86 @@ $ErrorActionPreference = "Stop"
 
 $root = [System.IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $root "dist"))
-$distDirFull = [System.IO.Path]::GetFullPath($DistDir)
 $exeSuffix = if ($IsWindows -or $env:OS -match "Windows") { ".exe" } else { "" }
+
+function Get-FeatureSet {
+    param([string] $FeatureString)
+
+    $set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($feature in ($FeatureString -split '[,\s]+' | Where-Object { $_.Trim() })) {
+        [void] $set.Add($feature.Trim())
+    }
+    return $set
+}
+
+function Test-GgmlCudaRuntimeAvailable {
+    $candidates = @()
+    $candidates += Join-Path $root "target\release"
+    if ($env:S2_CPP_DLL_DIR) {
+        $candidates += $env:S2_CPP_DLL_DIR
+    }
+    if ($env:S2_CPP_LIB) {
+        $libDir = [System.IO.Path]::GetFullPath($env:S2_CPP_LIB)
+        $nativeRoot = Split-Path -Parent $libDir
+        $candidates += Join-Path $nativeRoot "ggml\bin\Release"
+        $candidates += Join-Path $nativeRoot "ggml\bin"
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath (Join-Path $candidate "ggml-cuda.dll")) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function ConvertTo-SafeArtifactSuffix {
+    param([string] $Suffix)
+
+    $safe = ($Suffix.Trim() -replace '^[\-_]+', '') -replace '[^A-Za-z0-9_.-]+', '-'
+    $safe = $safe.Trim('-_.')
+    if ($safe) {
+        return "-$safe"
+    }
+    return ""
+}
+
+function Get-AutoArtifactSuffix {
+    param([string] $FeatureString)
+
+    $features = Get-FeatureSet $FeatureString
+    $parts = [System.Collections.Generic.List[string]]::new()
+    if ($features.Contains("cpp-engine")) {
+        if (Test-GgmlCudaRuntimeAvailable) {
+            $parts.Add("cpp-cuda")
+        } else {
+            $parts.Add("cpp")
+        }
+    }
+    if ($features.Contains("candle-cuda")) {
+        $parts.Add("candle-cuda")
+    } elseif ($features.Contains("candle-backend")) {
+        $parts.Add("candle")
+    }
+    if ($parts.Count -eq 0) {
+        return ""
+    }
+    return "-" + ($parts -join "-")
+}
+
+$artifactSuffixResolved = if ($ArtifactSuffix.Trim()) {
+    ConvertTo-SafeArtifactSuffix $ArtifactSuffix
+} else {
+    Get-AutoArtifactSuffix $Features
+}
+$artifactLabel = $artifactSuffixResolved.TrimStart("-")
+if (-not $DistDir.Trim()) {
+    $packageName = if ($artifactLabel) { "fish-s2pro-mvp-$artifactLabel" } else { "fish-s2pro-mvp" }
+    $DistDir = Join-Path $distRoot $packageName
+}
+$distDirFull = [System.IO.Path]::GetFullPath($DistDir)
+$guiExeName = "fish-s2pro$artifactSuffixResolved$exeSuffix"
+$serverExeName = "fish_s2_server$artifactSuffixResolved$exeSuffix"
 
 function Invoke-Checked {
     param(
@@ -158,8 +237,8 @@ $modelsDir = Join-Path $distDirFull "models"
 New-Item -ItemType Directory -Force -Path $binDir, $scriptsDir, $docsDir, $modelsDir | Out-Null
 
 $releaseDir = Join-Path $root "target\release"
-Copy-RequiredFile (Join-Path $releaseDir "fish-s2pro$exeSuffix") (Join-Path $binDir "fish-s2pro$exeSuffix")
-Copy-RequiredFile (Join-Path $releaseDir "fish_s2_server$exeSuffix") (Join-Path $binDir "fish_s2_server$exeSuffix")
+Copy-RequiredFile (Join-Path $releaseDir "fish-s2pro$exeSuffix") (Join-Path $binDir $guiExeName)
+Copy-RequiredFile (Join-Path $releaseDir "fish_s2_server$exeSuffix") (Join-Path $binDir $serverExeName)
 Copy-OptionalGgmlRuntimeDlls $binDir
 
 Copy-RequiredFile (Join-Path $root "README.md") (Join-Path $distDirFull "README.md")
@@ -185,7 +264,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "Use-UnicodeEncoding.ps1")
 
 $root = Split-Path $PSScriptRoot -Parent
-$server = Join-Path $root "bin\fish_s2_server.exe"
+$server = Join-Path $root "bin\__SERVER_EXE__"
 if (-not (Test-Path -LiteralPath $server)) { throw "server binary not found: $server" }
 if (-not (Test-Path -LiteralPath $Transformer)) { throw "transformer GGUF not found: $Transformer" }
 if (-not (Test-Path -LiteralPath $Codec)) { throw "codec GGUF not found: $Codec" }
@@ -204,6 +283,7 @@ if ($CodecCuda) {
 
 & $server @args
 '@
+$runServerScript = $runServerScript.Replace("__SERVER_EXE__", $serverExeName)
 Write-Utf8NoBom (Join-Path $scriptsDir "run_server.ps1") ($runServerScript + "`n")
 
 $smokeScript = @'
@@ -222,7 +302,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "Use-UnicodeEncoding.ps1")
 
 $root = Split-Path $PSScriptRoot -Parent
-$serverExe = Join-Path $root "bin\fish_s2_server.exe"
+$serverExe = Join-Path $root "bin\__SERVER_EXE__"
 $outDir = Split-Path -Parent $OutputWav
 $logDir = Join-Path $root "output"
 $stdout = Join-Path $logDir "server_smoke_stdout.txt"
@@ -314,6 +394,7 @@ try {
     Stop-SmokeServer
 }
 '@
+$smokeScript = $smokeScript.Replace("__SERVER_EXE__", $serverExeName)
 Write-Utf8NoBom (Join-Path $scriptsDir "smoke_server.ps1") ($smokeScript + "`n")
 
 $verifyPackageScript = @'
@@ -389,7 +470,7 @@ foreach ($script in @("check_cuda_compat.ps1", "run_server.ps1", "smoke_server.p
 }
 
 if (-not $SkipServerHelp) {
-    $server = Join-Path $root "bin\fish_s2_server.exe"
+    $server = Join-Path $root "bin\__SERVER_EXE__"
     if (-not (Test-Path -LiteralPath $server)) {
         throw "server binary not found: $server"
     }
@@ -437,6 +518,7 @@ if (-not $SkipServerHelp) {
 Write-Host "package_verified=true"
 Write-Host "checked_files=$checked"
 '@
+$verifyPackageScript = $verifyPackageScript.Replace("__SERVER_EXE__", $serverExeName)
 Write-Utf8NoBom (Join-Path $scriptsDir "verify_package.ps1") ($verifyPackageScript + "`n")
 
 $packageReadme = @"
@@ -446,8 +528,8 @@ This package contains the RustPure MVP binaries and optional cpp-engine/ffi-cuda
 
 ## Layout
 
-- bin/fish-s2pro${exeSuffix}: Windows desktop GUI.
-- bin/fish_s2_server${exeSuffix}: HTTP server for /v1/tts; supports rust-pure and, when linked, ffi/ffi-cuda.
+- bin/${guiExeName}: Windows desktop GUI.
+- bin/${serverExeName}: HTTP server for /v1/tts; supports rust-pure and, when linked, ffi/ffi-cuda.
 - bin/ggml*.dll: optional GGML runtime DLLs copied from S2_CPP_LIB for cpp-engine/CUDA packages.
 - models/: put tokenizer.json and the transformer-only + codec-only GGUF pair here.
 - scripts/: model download, packaged server launch, and smoke helpers.
@@ -458,13 +540,13 @@ This package contains the RustPure MVP binaries and optional cpp-engine/ffi-cuda
 ## Quick Start
 
 1. Download model assets with scripts/download_models.ps1 or copy them into models/.
-2. Run bin/fish-s2pro$exeSuffix for the GUI.
+2. Run bin/$guiExeName for the GUI.
 3. Or run scripts/run_server.ps1 -MaxNewTokens 1 -Port 8081.
 4. For CUDA FFI builds, run scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0.
 5. Codec CUDA diagnostics can be requested with scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0 -CodecCuda, but codec decode stays on CPU unless FISH_S2_CODEC_CUDA_UNSAFE=1 is set.
 6. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
 7. Validate the package files with scripts/verify_package.ps1.
-8. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.
+8. Diagnose package paths with bin/$serverExeName --print-paths.
 9. Check CUDA compatibility with scripts/check_cuda_compat.ps1.
 
 The package intentionally does not include model weights or tokenizer assets.
@@ -482,9 +564,11 @@ $manifest = [ordered]@{
     git_branch = Get-GitValue -GitArgs @("branch", "--show-current")
     package_dir = $distDirFull
     binaries = @(
-        "bin/fish-s2pro$exeSuffix",
-        "bin/fish_s2_server$exeSuffix"
+        "bin/$guiExeName",
+        "bin/$serverExeName"
     )
+    artifact_suffix = $artifactSuffixResolved
+    features = $Features
     scripts = @(
         "scripts/check_cuda_compat.ps1",
         "scripts/download_models.ps1",

@@ -20,6 +20,8 @@ mod wav;
 pub mod server;
 
 pub use attention::{apply_rope_normal, gqa_decode_attention, GqaAttentionShape, SlowArKvCache};
+#[cfg(feature = "candle-backend")]
+pub use backend::CandleMatmulBackend;
 pub use backend::{CpuMatmulBackend, MatmulBackend};
 pub use codec::{
     classify_codec_tensor, decode_waveform, decode_waveform_to_wav, encode_reference_audio,
@@ -71,11 +73,12 @@ pub use sampling::{
     SamplerParams, SeededRng, LOGIT_MASKED,
 };
 pub use slow_ar::{
-    embed_slow_ar_time_major, forward_slow_ar_block_prefill_layers,
-    forward_slow_ar_block_prefill_layers_cached, SlowArEmbeddingWeights, SlowArLayerBlockOutput,
-    SlowArLayerF16Weights, SlowArLayerFeedForwardOutput, SlowArLayerForwardOutput,
-    SlowArLayerShape, SlowArLayerSkeleton, SlowArLogitsOutput, SlowArOutputHeadF16Weights,
-    SlowArState, SlowArStepResult,
+    embed_slow_ar_time_major, forward_slow_ar_block_decode_layers_with_backend,
+    forward_slow_ar_block_prefill_layers, forward_slow_ar_block_prefill_layers_cached,
+    SlowArDecodeBackendContext, SlowArDecodeLayerRequest, SlowArDecodeProfile,
+    SlowArEmbeddingWeights, SlowArLayerBlockOutput, SlowArLayerF16Weights,
+    SlowArLayerFeedForwardOutput, SlowArLayerForwardOutput, SlowArLayerShape, SlowArLayerSkeleton,
+    SlowArLogitsOutput, SlowArOutputHeadF16Weights, SlowArState, SlowArStepResult,
 };
 pub use tensor::{
     embedding_lookup_rows, linear, linear_with_backend, matvec_f16_streaming, rms_norm,

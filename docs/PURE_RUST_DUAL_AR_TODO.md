@@ -11,6 +11,7 @@
 | GGUF load + tensor bytes | `crates/fish_s2_core/src/gguf.rs` | Done (mmap index, F16 views in `fish_s2_infer::tensor`) |
 | C++ FFI shim | `crates/fish_s2_infer/ffi/s2_engine_ffi.{h,cpp}` | Scaffold (needs link to real `s2::Pipeline`) |
 | Fallback CLI | `engine.rs` → `bin/s2.exe` | Legacy opt-in via `legacy-s2-exe` feature |
+| Native dependency cleanup | `Cargo.toml`, `crates/fish_s2_core/Cargo.toml`, `crates/fish_s2_infer/Cargo.toml` | In progress (`tokenizers` uses pure-Rust `fancy-regex`; HTTP client is opt-in via `http-client`; C++ FFI/Candle remain optional) |
 
 **Reference implementation (source of truth for math):**
 
@@ -217,12 +218,28 @@
   - `scripts/verify_mvp.ps1 -CheckCuda [-RequireCuda]` can include the preflight in MVP validation.
   - `scripts/check_cuda_compat.ps1 -RunBuildSmoke` can run the existing s2.cpp CUDA Slow-AR dump build smoke from the source tree.
 - [ ] `fish_s2_infer::backend::MatmulBackend` trait
-  - CPU reference backend first; GPU backend later.
+  - [x] CPU reference backend first (`CpuMatmulBackend`).
+  - [x] Pure-Rust CPU row-parallel matvec/linear via Rayon for RustPure Slow-AR/codec hot paths.
+  - [ ] GPU backend later, preferably Rust-native (`wgpu`, `cudarc`, or Candle/Burn backend) so the long-term path does not depend on Python or C/C++ graph code.
   - [x] Pre-slice: add `MatmulBackend` + `CpuMatmulBackend`, and route `tensor::linear` through the backend abstraction without changing CPU numerics.
   - Acceptance: Slow/Fast/codec ops call through backend abstraction where practical.
 - [ ] CUDA/Vulkan/WGPU spike for `matvec`, RMSNorm, RoPE, attention
   - Start with output-head matvec and layer FFN matvec as highest-cost ops.
   - Acceptance: one Slow-AR layer parity and measured speedup vs CPU.
+- [ ] Candle backend spike
+  - [x] Add feature-gated `CandleMatmulBackend` (`candle-backend`) implementing `MatmulBackend::linear`.
+  - [x] Add `candle-cuda` feature hook for Candle CUDA device construction.
+  - [x] CPU Candle matmul smoke matches `CpuMatmulBackend`.
+  - [x] Route selected Slow-AR decode hot ops (`linear`, `rms_norm`/head norm, GQA attention) through the backend trait; `SlowArDecodeProfile` records per-op timings and top ops.
+  - [ ] Route output-head streaming matvec and codec decode ops through a runtime-selected backend.
+  - [ ] Resolve strict no-C caveat: Candle 0.10.2 currently depends on `tokenizers 0.22` with `onig`, so `candle-backend` is optional and not part of the dependency-free default build.
+- [ ] Native dependency removal
+  - [x] Replace `tokenizers` `onig` feature with pure-Rust `fancy-regex` so tokenizer loading no longer pulls `onig_sys`.
+  - [x] Remove unused `cc` build-dependency from `fish_s2_infer`; the C++ shim links prebuilt `fish_s2_cpp` only when `cpp-engine`/`S2_CPP_LIB` is selected.
+  - [x] Keep Candle as an opt-in feature because upstream `candle-core` currently reintroduces `onig`.
+  - [x] Split GUI/server HTTP client support behind `http-client`; default GUI/core builds no longer compile `reqwest`, `rustls`, or `ring`.
+  - [ ] Keep model downloader scripts external to Rust or add a separate opt-in Rust downloader feature if a compiled downloader is needed.
+  - Acceptance: `cargo tree -p fish_s2_infer -i onig`, `cargo tree -p fish_s2_gui -i reqwest`, and `cargo tree -p fish_s2_gui -i ring` report no match for default builds; a no-`cpp-engine` release build succeeds.
 
 ---
 
@@ -356,7 +373,7 @@
 - [x] **9.2** Delete unused `fish_s2_core::server::ServerProcess` if fully deprecated. The module is retained only behind `legacy-s2-exe`, so default builds do not compile/export the old external-process launcher.
 - [x] **9.3** Update `models/README.txt` + download script for model sources. `scripts/download_models.ps1` now supports `fishaudio/s2-pro` official checkpoint downloads via `-IncludeOfficialCheckpoint` and GGUF runtime pairs via `-IncludeGguf -Quant ...`; direct Rust inference still uses GGUF while official Safetensors are tokenizer/source/conversion inputs.
 - [x] **9.4** License attribution: `README.md`, `README.zh-TW.md`, `models/README.txt`, and `docs/THIRD_PARTY_NOTICES.md` now distinguish MIT project code from Fish Audio Research License model assets and link upstream model repositories.
-- [x] **9.5** MVP packaging script: `scripts/package_mvp.ps1` builds release GUI/server binaries and writes `dist/fish-s2pro-mvp/` with package-local launch/smoke/verify scripts, model download helper, manifest, checksums, and license/model notes. Model weights/tokenizer are intentionally excluded.
+- [x] **9.5** MVP packaging script: `scripts/package_mvp.ps1` builds release GUI/server binaries and writes `dist/fish-s2pro-mvp/` with package-local launch/smoke/verify scripts, model download helper, manifest, checksums, and license/model notes. Feature builds no longer overwrite the plain exe names: `candle-backend`, `candle-cuda`, and CUDA cpp-engine packages use suffixed binaries such as `fish-s2pro-candle-cuda.exe`. Model weights/tokenizer are intentionally excluded.
 - [x] **9.6** Portable exe root detection: release binaries launched from `dist/fish-s2pro-mvp/bin/` resolve package-local `models/`, `output/`, and `runtime/`; `fish_s2_server --print-paths` prints the effective paths for diagnostics.
 
 ---
@@ -395,8 +412,8 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 2. `cargo run -p fish_s2_infer --bin fish_s2_server` synthesizes WAV from `models/` **without** C++ binary or static lib.
 3. GUI “Rust 推理引擎” can launch `rust-pure` / `ffi`, set short smoke `max_new_tokens`, and works on Windows with documented GPU setup. Legacy `subprocess` requires `legacy-s2-exe`.
 4. README states license + model download steps.
-5. `scripts/package_mvp.ps1 -RunVerify` produces a local MVP package under `dist/`.
+5. `scripts/package_mvp.ps1 -RunVerify` produces a local MVP package under `dist/`; feature packages use non-overwriting suffixed exe names.
 
 ---
 
-*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; legacy `s2.exe` subprocess fallback is now opt-in via `legacy-s2-exe`; `scripts/package_mvp.ps1` produces a self-verifying local MVP package under `dist/`; packaged exe path diagnostics are available through `fish_s2_server --print-paths`; CUDA compatibility preflight is available through `scripts/check_cuda_compat.ps1`; next product work is optional slow `-RunServerSmoke`, broader release polish, and Phase 8 GPU acceleration.*
+*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; legacy `s2.exe` subprocess fallback is now opt-in via `legacy-s2-exe`; `scripts/package_mvp.ps1` produces a self-verifying local MVP package under `dist/` and feature builds keep non-overwriting suffixed exe names; packaged exe path diagnostics are available through `fish_s2_server --print-paths`; CUDA compatibility preflight is available through `scripts/check_cuda_compat.ps1`; next product work is optional slow `-RunServerSmoke`, broader release polish, and Phase 8 GPU acceleration.*

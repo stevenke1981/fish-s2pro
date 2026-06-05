@@ -1,4 +1,5 @@
 use fish_s2_core::gguf::{GgmlType, GgufFile};
+use rayon::prelude::*;
 
 use crate::backend::{CpuMatmulBackend, MatmulBackend};
 use crate::error::{InferError, Result};
@@ -152,23 +153,7 @@ impl F16TensorBytes {
 }
 
 pub fn rms_norm(input: &[f32], weight: &[f32], eps: f32) -> Result<Vec<f32>> {
-    if input.is_empty() {
-        return Err(InferError::Message("rms_norm input is empty".into()));
-    }
-    if input.len() != weight.len() {
-        return Err(InferError::Message(format!(
-            "rms_norm length mismatch: input={}, weight={}",
-            input.len(),
-            weight.len()
-        )));
-    }
-    let mean_square = input.iter().map(|value| value * value).sum::<f32>() / input.len() as f32;
-    let scale = (mean_square + eps).sqrt().recip();
-    Ok(input
-        .iter()
-        .zip(weight)
-        .map(|(value, weight)| value * scale * weight)
-        .collect())
+    CpuMatmulBackend::new().rms_norm(input, weight, eps)
 }
 
 /// Row gather for embedding tables stored like ggml `get_rows` on `[hidden_dim, vocab_dim]`
@@ -259,18 +244,22 @@ pub fn matvec_f16_streaming(
     let row_stride = input_dim
         .checked_mul(2)
         .ok_or_else(|| InferError::Message("matvec_f16_streaming row stride overflow".into()))?;
-    for (output_index, output_value) in output.iter_mut().enumerate() {
-        let row_start = output_index.checked_mul(row_stride).ok_or_else(|| {
-            InferError::Message("matvec_f16_streaming row offset overflow".into())
-        })?;
-        let row = &weight_f16_le[row_start..row_start + row_stride];
-        let mut sum = 0.0f32;
-        for (input_value, weight_bytes) in input.iter().zip(row.chunks_exact(2)) {
-            let weight = f16_bits_to_f32(u16::from_le_bytes([weight_bytes[0], weight_bytes[1]]));
-            sum += input_value * weight;
-        }
-        *output_value = sum;
-    }
+    output.par_iter_mut().enumerate().try_for_each(
+        |(output_index, output_value)| -> Result<()> {
+            let row_start = output_index.checked_mul(row_stride).ok_or_else(|| {
+                InferError::Message("matvec_f16_streaming row offset overflow".into())
+            })?;
+            let row = &weight_f16_le[row_start..row_start + row_stride];
+            let mut sum = 0.0f32;
+            for (input_value, weight_bytes) in input.iter().zip(row.chunks_exact(2)) {
+                let weight =
+                    f16_bits_to_f32(u16::from_le_bytes([weight_bytes[0], weight_bytes[1]]));
+                sum += input_value * weight;
+            }
+            *output_value = sum;
+            Ok(())
+        },
+    )?;
     Ok(output)
 }
 

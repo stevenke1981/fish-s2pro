@@ -106,12 +106,21 @@ pub struct RustPipeline {
     tokenizer: S2Tokenizer,
     graph: DualArGraphSpec,
     slow_state: SlowArState,
+    prompt_cache: Option<CachedPrompt>,
     fast_weights: FastArWeights,
     rvq_weights: CodecF16Weights,
     reference_encoder_weights: CodecReferenceEncoderF16Weights,
     post_weights: CodecPostModuleF16Weights,
     upsample_weights: CodecUpsampleF16Weights,
     decoder_weights: CodecDecoderF16Weights,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedPrompt {
+    text: String,
+    prompt_text: Option<String>,
+    prompt_codes: Option<PromptCodes>,
+    prompt: crate::prompt::PromptTensor,
 }
 
 impl RustPipeline {
@@ -144,6 +153,7 @@ impl RustPipeline {
             tokenizer,
             graph,
             slow_state,
+            prompt_cache: None,
             fast_weights,
             rvq_weights,
             reference_encoder_weights,
@@ -158,15 +168,7 @@ impl RustPipeline {
             options.prompt_text.as_deref(),
             options.prompt_codes.as_ref(),
         )?;
-        let prompt = build_prompt(
-            &self.tokenizer,
-            PromptBuildOptions {
-                text: &options.text,
-                prompt_text: options.prompt_text.as_deref(),
-                prompt_codes: options.prompt_codes.as_ref(),
-                graph: &self.graph,
-            },
-        )?;
+        let prompt = self.cached_prompt(options)?;
         let prompt_cols = prompt.cols;
         let mut rng = SeededRng::new(options.seed);
         let codes = generate_codes(
@@ -194,6 +196,36 @@ impl RustPipeline {
             waveform,
             wav_bytes,
         })
+    }
+
+    fn cached_prompt(
+        &mut self,
+        options: &RustSynthesisOptions,
+    ) -> Result<crate::prompt::PromptTensor> {
+        if let Some(cached) = self.prompt_cache.as_ref().filter(|cached| {
+            cached.text == options.text
+                && cached.prompt_text == options.prompt_text
+                && cached.prompt_codes == options.prompt_codes
+        }) {
+            return Ok(cached.prompt.clone());
+        }
+
+        let prompt = build_prompt(
+            &self.tokenizer,
+            PromptBuildOptions {
+                text: &options.text,
+                prompt_text: options.prompt_text.as_deref(),
+                prompt_codes: options.prompt_codes.as_ref(),
+                graph: &self.graph,
+            },
+        )?;
+        self.prompt_cache = Some(CachedPrompt {
+            text: options.text.clone(),
+            prompt_text: options.prompt_text.clone(),
+            prompt_codes: options.prompt_codes.clone(),
+            prompt: prompt.clone(),
+        });
+        Ok(prompt)
     }
 
     pub fn graph_spec(&self) -> &DualArGraphSpec {

@@ -121,6 +121,16 @@ notes. The package includes `manifest.json`, `SHA256SUMS.txt`, and
 write `dist\fish-s2pro-mvp.zip`. Model weights and tokenizer assets are
 intentionally not bundled.
 
+Feature builds are packaged with non-overwriting artifact names. For example,
+`-Features candle-backend` writes `fish-s2pro-candle.exe` and
+`fish_s2_server-candle.exe`, while `-Features candle-cuda` writes
+`fish-s2pro-candle-cuda.exe` and `fish_s2_server-candle-cuda.exe`. Use
+`-ArtifactSuffix cuda` to force a custom suffix.
+
+The GUI HTTP client is opt-in. Default builds avoid `reqwest`/`rustls`/`ring`;
+build with `--features http-client` only when the GUI needs to call an already
+running `/v1/tts` endpoint from the Server tab.
+
 ## GPU / CUDA
 
 RustPure inference is CPU-first today. CUDA compatibility is currently used for

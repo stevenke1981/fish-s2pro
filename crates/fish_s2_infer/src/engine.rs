@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 
 use crate::error::{InferError, Result};
 use crate::generate::GenerateParams;
@@ -137,11 +138,26 @@ struct CachedReference {
     prompt_codes: PromptCodes,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReferenceCacheKey {
+    wav_path: PathBuf,
+    wav_len: u64,
+    wav_modified_nanos: Option<u128>,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRequestReference {
+    key: ReferenceCacheKey,
+    reference: CachedReference,
+}
+
 /// Rust-facing inference engine (replaces external `s2.exe` process).
 pub struct InferenceEngine {
     config: EngineConfig,
     rust_pipeline: Option<Mutex<RustPipeline>>,
     default_reference: Option<CachedReference>,
+    request_reference: Mutex<Option<CachedRequestReference>>,
     #[cfg(s2_cpp_linked)]
     native: Option<Mutex<native::NativeEngine>>,
 }
@@ -183,6 +199,7 @@ impl InferenceEngine {
             config,
             rust_pipeline,
             default_reference,
+            request_reference: Mutex::new(None),
             #[cfg(s2_cpp_linked)]
             native,
         })
@@ -204,8 +221,10 @@ impl InferenceEngine {
     }
 
     pub fn synthesize_wav(&self, request: &SynthesisRequest) -> Result<Vec<u8>> {
-        if let (Some(wav), Some(text)) = (&request.reference_wav, &request.reference_text) {
-            self.apply_reference(wav, text)?;
+        if self.config.backend != EngineBackend::RustPure {
+            if let (Some(wav), Some(text)) = (&request.reference_wav, &request.reference_text) {
+                self.apply_reference(wav, text)?;
+            }
         }
 
         match self.config.backend {
@@ -245,8 +264,8 @@ impl InferenceEngine {
             .with_seed(self.config.seed);
         match (&request.reference_wav, &request.reference_text) {
             (Some(wav), Some(text)) => {
-                let prompt_codes = pipeline.encode_reference_wav(wav)?;
-                options = options.with_reference(text.clone(), prompt_codes);
+                let reference = self.cached_request_reference(&pipeline, wav, text)?;
+                options = options.with_reference(reference.text, reference.prompt_codes);
             }
             (None, None) => {
                 if let Some(reference) = &self.default_reference {
@@ -262,6 +281,39 @@ impl InferenceEngine {
         }
 
         Ok(pipeline.synthesize(&options)?.wav_bytes)
+    }
+
+    fn cached_request_reference(
+        &self,
+        pipeline: &RustPipeline,
+        wav: &Path,
+        text: &str,
+    ) -> Result<CachedReference> {
+        let key = ReferenceCacheKey::from_path(wav, text)?;
+        {
+            let guard = self
+                .request_reference
+                .lock()
+                .map_err(|_| InferError::Message("reference cache lock poisoned".into()))?;
+            if let Some(cached) = guard.as_ref().filter(|cached| cached.key == key) {
+                return Ok(cached.reference.clone());
+            }
+        }
+
+        let prompt_codes = pipeline.encode_reference_wav(wav)?;
+        let reference = CachedReference {
+            text: text.to_string(),
+            prompt_codes,
+        };
+        let mut guard = self
+            .request_reference
+            .lock()
+            .map_err(|_| InferError::Message("reference cache lock poisoned".into()))?;
+        *guard = Some(CachedRequestReference {
+            key,
+            reference: reference.clone(),
+        });
+        Ok(reference)
     }
 
     fn load_workdir_reference(
@@ -351,6 +403,24 @@ impl InferenceEngine {
         link_or_copy(&config.transformer_gguf, &config.workdir.join("model.gguf"))?;
         link_or_copy(&config.codec_gguf, &config.workdir.join("codec.gguf"))?;
         Ok(())
+    }
+}
+
+impl ReferenceCacheKey {
+    fn from_path(wav: &Path, text: &str) -> Result<Self> {
+        let metadata = std::fs::metadata(wav)?;
+        let wav_path = std::fs::canonicalize(wav).unwrap_or_else(|_| wav.to_path_buf());
+        let wav_modified_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos());
+        Ok(Self {
+            wav_path,
+            wav_len: metadata.len(),
+            wav_modified_nanos,
+            text: text.to_string(),
+        })
     }
 }
 
@@ -498,6 +568,7 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn parses_backend_names() {
@@ -522,5 +593,30 @@ mod tests {
         #[cfg(not(feature = "legacy-s2-exe"))]
         assert!(EngineBackend::parse("subprocess").is_err());
         assert!(EngineBackend::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn reference_cache_key_tracks_text_and_file_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "fish_s2_reference_cache_key_{}_{}.wav",
+            std::process::id(),
+            "smoke"
+        ));
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(b"one").unwrap();
+        }
+        let key_a = ReferenceCacheKey::from_path(&path, "same text").unwrap();
+        let key_b = ReferenceCacheKey::from_path(&path, "different text").unwrap();
+        assert_ne!(key_a, key_b);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(b"longer").unwrap();
+        }
+        let key_c = ReferenceCacheKey::from_path(&path, "same text").unwrap();
+        assert_ne!(key_a, key_c);
+        let _ = std::fs::remove_file(path);
     }
 }

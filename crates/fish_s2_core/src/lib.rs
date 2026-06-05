@@ -22,5 +22,7 @@ pub use server::{
     build_start_options, resolve_s2_binary, ServerProcess, ServerStartOptions, ServerStatus,
 };
 pub use tags::{ControlTag, CONTROL_TAGS};
-pub use tts::{TtsClient, TtsRequest, TtsResponse};
+#[cfg(feature = "http-client")]
+pub use tts::TtsClient;
+pub use tts::{TtsRequest, TtsResponse};
 pub use voice::VoiceProfile;

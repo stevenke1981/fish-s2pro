@@ -13,6 +13,10 @@ required-features = ["server"]
 [features]
 default = ["server"]
 server = ["dep:axum", "dep:tokio"]
+# Rust-native tensor backend spike. `candle-backend` is CPU-only; `candle-cuda`
+# opts into Candle's CUDA feature for machines with a compatible CUDA toolchain.
+candle-backend = ["dep:candle-core"]
+candle-cuda = ["candle-backend", "candle-core/cuda"]
 # Links mach92432/s2.cpp (ggml) when S2_CPP_DIR points to a built tree.
 cpp-engine = []
 # Enables the legacy external bin/s2.exe subprocess backend.
@@ -27,9 +31,8 @@ tracing.workspace = true
 fish_s2_core = { path = "../fish_s2_core" }
 byteorder = "1"
 memmap2 = "0.9"
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+rayon = "1"
+candle-core = { version = "0.10.2", optional = true }
 axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"], optional = true }
-
-[build-dependencies]
-cc = "1"

@@ -1,3 +1,4 @@
+use crate::backend::{CpuMatmulBackend, MatmulBackend};
 use crate::error::{InferError, Result};
 use crate::registry::KvCacheSpec;
 
@@ -92,6 +93,25 @@ impl SlowArKvCache {
         head_count: usize,
         attn_scale: f32,
     ) -> Result<Vec<f32>> {
+        self.decode_attention_with_backend(
+            &CpuMatmulBackend::new(),
+            layer,
+            token_count,
+            query_heads,
+            head_count,
+            attn_scale,
+        )
+    }
+
+    pub fn decode_attention_with_backend(
+        &self,
+        backend: &impl MatmulBackend,
+        layer: usize,
+        token_count: usize,
+        query_heads: &[f32],
+        head_count: usize,
+        attn_scale: f32,
+    ) -> Result<Vec<f32>> {
         if token_count > self.max_seq_len {
             return Err(InferError::Message(format!(
                 "token_count {token_count} exceeds KV cache max_seq_len {}",
@@ -110,7 +130,7 @@ impl SlowArKvCache {
             keys.extend_from_slice(self.key_token(layer, token)?);
             values.extend_from_slice(self.value_token(layer, token)?);
         }
-        gqa_decode_attention(
+        backend.gqa_decode_attention(
             query_heads,
             &keys,
             &values,

@@ -7,6 +7,9 @@ description = "Fish Audio S2 Pro — GGUF, server, and TTS client core"
 
 [features]
 default = []
+# Enables the blocking HTTP TTS client. Keep this off for native-dependency-free
+# default builds because reqwest/rustls pulls ring.
+http-client = ["dep:reqwest"]
 # Enables the legacy external bin/s2.exe server process helpers.
 legacy-s2-exe = []
 
@@ -15,7 +18,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 directories.workspace = true
 chrono.workspace = true
 uuid.workspace = true
