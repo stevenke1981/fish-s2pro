@@ -1,9 +1,38 @@
 use std::path::{Path, PathBuf};
-#[cfg(s2_cpp_linked)]
 use std::sync::Mutex;
 
 use crate::error::{InferError, Result};
+use crate::generate::GenerateParams;
 use crate::paths::{default_tokenizer_path, ensure_project_dirs, project_root, server_workdir};
+use crate::pipeline::{RustPipeline, RustPipelineConfig, RustSynthesisOptions};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineBackend {
+    RustPure,
+    Ffi,
+    Subprocess,
+}
+
+impl EngineBackend {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "rust" | "rust-pure" | "pure-rust" => Ok(Self::RustPure),
+            "ffi" | "cpp" | "native" => Ok(Self::Ffi),
+            "subprocess" | "s2" | "s2.exe" => Ok(Self::Subprocess),
+            other => Err(InferError::Message(format!(
+                "unknown backend: {other} (expected rust-pure, ffi, or subprocess)"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RustPure => "rust-pure",
+            Self::Ffi => "ffi",
+            Self::Subprocess => "subprocess",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -11,6 +40,9 @@ pub struct EngineConfig {
     pub codec_gguf: PathBuf,
     pub tokenizer_path: PathBuf,
     pub workdir: PathBuf,
+    pub backend: EngineBackend,
+    pub generate_params: GenerateParams,
+    pub seed: u64,
     pub vulkan_device: i32,
     pub codec_vulkan_device: i32,
 }
@@ -35,6 +67,9 @@ impl EngineConfig {
             codec_gguf,
             tokenizer_path: default_tokenizer_path(),
             workdir: server_workdir(),
+            backend: EngineBackend::RustPure,
+            generate_params: GenerateParams::default(),
+            seed: 0,
             vulkan_device: 0,
             codec_vulkan_device: 0,
         })
@@ -51,8 +86,9 @@ pub struct SynthesisRequest {
 /// Rust-facing inference engine (replaces external `s2.exe` process).
 pub struct InferenceEngine {
     config: EngineConfig,
+    rust_pipeline: Option<Mutex<RustPipeline>>,
     #[cfg(s2_cpp_linked)]
-    native: Mutex<native::NativeEngine>,
+    native: Option<Mutex<native::NativeEngine>>,
 }
 
 impl InferenceEngine {
@@ -65,19 +101,41 @@ impl InferenceEngine {
             )));
         }
 
-        #[cfg(s2_cpp_linked)]
-        {
-            let native = native::NativeEngine::load(&config)?;
-            return Ok(Self {
-                config,
-                native: Mutex::new(native),
-            });
-        }
+        let rust_pipeline = if config.backend == EngineBackend::RustPure {
+            Some(Mutex::new(RustPipeline::load(
+                RustPipelineConfig::new(&config.transformer_gguf, &config.codec_gguf)
+                    .with_tokenizer(&config.tokenizer_path),
+            )?))
+        } else {
+            None
+        };
 
         #[cfg(not(s2_cpp_linked))]
-        {
-            Ok(Self { config })
+        if config.backend == EngineBackend::Ffi {
+            return Err(InferError::NativeNotLinked);
         }
+
+        #[cfg(s2_cpp_linked)]
+        let native = if config.backend == EngineBackend::Ffi {
+            Some(Mutex::new(native::NativeEngine::load(&config)?))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            rust_pipeline,
+            #[cfg(s2_cpp_linked)]
+            native,
+        })
+    }
+
+    pub fn backend(&self) -> EngineBackend {
+        self.config.backend
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.config.backend.as_str()
     }
 
     pub fn apply_reference(&self, wav: &Path, text: &str) -> Result<()> {
@@ -92,22 +150,56 @@ impl InferenceEngine {
             self.apply_reference(wav, text)?;
         }
 
-        #[cfg(s2_cpp_linked)]
-        {
-            let native = self
-                .native
-                .lock()
-                .map_err(|_| InferError::Message("engine lock poisoned".to_string()))?;
-            return native.synthesize(&request.text, request.reference_text.as_deref());
-        }
+        match self.config.backend {
+            EngineBackend::RustPure => self.synthesize_via_rust_pipeline(request),
+            EngineBackend::Ffi => {
+                #[cfg(s2_cpp_linked)]
+                {
+                    let native = self
+                        .native
+                        .as_ref()
+                        .ok_or_else(|| InferError::Message("FFI backend not loaded".into()))?
+                        .lock()
+                        .map_err(|_| InferError::Message("engine lock poisoned".to_string()))?;
+                    native.synthesize(&request.text, request.reference_text.as_deref())
+                }
 
-        #[cfg(not(s2_cpp_linked))]
-        {
-            Self::synthesize_via_embedded_cli(&self.config, request)
+                #[cfg(not(s2_cpp_linked))]
+                {
+                    Err(InferError::NativeNotLinked)
+                }
+            }
+            EngineBackend::Subprocess => Self::synthesize_via_embedded_cli(&self.config, request),
         }
     }
 
-    #[cfg(not(s2_cpp_linked))]
+    fn synthesize_via_rust_pipeline(&self, request: &SynthesisRequest) -> Result<Vec<u8>> {
+        let mut pipeline = self
+            .rust_pipeline
+            .as_ref()
+            .ok_or_else(|| InferError::Message("RustPure backend not loaded".into()))?
+            .lock()
+            .map_err(|_| InferError::Message("RustPure pipeline lock poisoned".into()))?;
+
+        let mut options = RustSynthesisOptions::new(request.text.clone())
+            .with_params(self.config.generate_params)
+            .with_seed(self.config.seed);
+        match (&request.reference_wav, &request.reference_text) {
+            (Some(wav), Some(text)) => {
+                let prompt_codes = pipeline.encode_reference_wav(wav)?;
+                options = options.with_reference(text.clone(), prompt_codes);
+            }
+            (None, None) => {}
+            _ => {
+                return Err(InferError::Message(
+                    "reference_wav and reference_text must both be set for RustPure".into(),
+                ));
+            }
+        }
+
+        Ok(pipeline.synthesize(&options)?.wav_bytes)
+    }
+
     fn synthesize_via_embedded_cli(
         config: &EngineConfig,
         request: &SynthesisRequest,
@@ -115,11 +207,7 @@ impl InferenceEngine {
         let binary = Self::resolve_s2_binary();
         if !binary.exists() {
             return Err(InferError::Message(format!(
-                "Rust ggml backend not linked. Build native engine:\n  \
-                 git clone https://github.com/mach92432/s2.cpp\n  \
-                 .\\scripts\\build_s2_native.ps1 -S2CppDir <path>\n  \
-                 cargo build -p fish_s2_gui --features cpp-engine\n\
-                 Or place s2.exe in {}",
+                "s2 binary not found: {}",
                 project_root().join("bin").display()
             )));
         }
@@ -307,5 +395,24 @@ mod native {
         unsafe { CStr::from_ptr(buf.as_ptr()) }
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_backend_names() {
+        assert_eq!(
+            EngineBackend::parse("rust-pure").unwrap(),
+            EngineBackend::RustPure
+        );
+        assert_eq!(EngineBackend::parse("ffi").unwrap(), EngineBackend::Ffi);
+        assert_eq!(
+            EngineBackend::parse("subprocess").unwrap(),
+            EngineBackend::Subprocess
+        );
+        assert!(EngineBackend::parse("unknown").is_err());
     }
 }

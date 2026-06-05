@@ -197,6 +197,11 @@
   - Calls tokenizer -> Slow-AR -> Fast-AR -> codec.
   - Acceptance: returns valid RIFF and passes Phase 0 envelope parity for the 1-token smoke. Next validation: reference-prompt full E2E WAV or longer generated length.
 - [ ] `fish_s2_infer::engine::Backend::{RustPure,Ffi,Subprocess}`
+  - [x] `EngineBackend::{RustPure,Ffi,Subprocess}` added; `EngineConfig::new(...)` defaults to `RustPure`.
+  - [x] `InferenceEngine::load` owns a `Mutex<RustPipeline>` for RustPure, optional FFI native engine for `cpp-engine`, or subprocess fallback.
+  - [x] `fish_s2_server --backend rust-pure|ffi|subprocess [--max-new-tokens N]` selects the backend explicitly.
+  - [x] Server-level smoke passed: `fish_s2_server --backend rust-pure --max-new-tokens 1` + POST `/v1/tts` returns valid WAV (`44100 Hz`, mono, `0.04644s`, `rms≈0.188984`).
+  - [x] `scripts/smoke_rust_server.ps1` automates release server startup, `/health`, `/v1/tts`, WAV metrics, and cleanup.
   - Feature-gated backend selection with explicit logs.
   - Acceptance: GUI/server can choose RustPure when complete, FFI/subprocess fallback otherwise.
 
@@ -312,9 +317,9 @@
 *Depends on: Phase 3–6*
 
 - [ ] **7.1** `fish_s2_infer::pipeline::Pipeline` mirroring `s2::Pipeline` API.
-- [ ] **7.2** Replace `InferenceEngine` backend selection: `Backend::RustPure` vs `Backend::Ffi` vs `Backend::Subprocess` (feature flags).
-- [ ] **7.3** Reference conditioning: load `reference.wav` + `reference.txt` at `load()` time.
-- [ ] **7.4** E2E parity: same text as Phase 0.3 — envelope/SNR vs `golden.wav`.
+- [x] **7.2** Replace `InferenceEngine` backend selection: `Backend::RustPure` vs `Backend::Ffi` vs `Backend::Subprocess` (feature flags).
+- [x] **7.3** Reference conditioning: RustPure backend can encode `reference_wav` + `reference_text` into prompt codes per request.
+- [x] **7.4** E2E parity: same text as Phase 0.3 — envelope/SNR vs `golden.wav` (`dump_e2e_wav_parity.ps1 -MaxNewTokens 1` and server-level smoke pass).
 
 **Acceptance:** `fish_s2_server` + GUI work with **no** `s2.exe` and **no** `fish_s2_cpp.lib`.
 

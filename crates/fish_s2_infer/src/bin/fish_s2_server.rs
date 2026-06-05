@@ -10,12 +10,16 @@
 use std::path::PathBuf;
 
 use fish_s2_infer::spawn_server;
-use fish_s2_infer::{default_tokenizer_path, models_dir, EngineConfig, InferenceEngine};
+use fish_s2_infer::{
+    default_tokenizer_path, models_dir, EngineBackend, EngineConfig, InferenceEngine,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut transformer = None;
     let mut codec = None;
+    let mut backend = None;
+    let mut max_new_tokens = None;
     let mut port: u16 = 8081;
     let mut i = 1;
     while i < args.len() {
@@ -38,6 +42,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .parse()
                     .map_err(|_| "invalid port")?;
             }
+            "--backend" => {
+                i += 1;
+                backend = Some(EngineBackend::parse(
+                    args.get(i).ok_or("missing --backend")?,
+                )?);
+            }
+            "--max-new-tokens" => {
+                i += 1;
+                max_new_tokens = Some(
+                    args.get(i)
+                        .ok_or("missing --max-new-tokens")?
+                        .parse()
+                        .map_err(|_| "invalid --max-new-tokens")?,
+                );
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -56,7 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => auto_discover_pair()?,
     };
 
-    let cfg = EngineConfig::new(transformer, codec)?;
+    let mut cfg = EngineConfig::new(transformer, codec)?;
+    if let Some(backend) = backend {
+        cfg.backend = backend;
+    }
+    if let Some(max_new_tokens) = max_new_tokens {
+        cfg.generate_params.max_new_tokens = max_new_tokens;
+    }
     if !default_tokenizer_path().exists() {
         eprintln!(
             "warning: tokenizer missing at {} — run scripts/download_models.ps1",
@@ -65,7 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!(
-        "loading models (may take a while)...\n  transformer: {}\n  codec: {}",
+        "loading models (may take a while)...\n  backend: {}\n  transformer: {}\n  codec: {}",
+        cfg.backend.as_str(),
         cfg.transformer_gguf.display(),
         cfg.codec_gguf.display()
     );
@@ -125,7 +151,7 @@ fn print_help() {
         r#"fish_s2_server — in-process S2 Pro inference (Rust)
 
 Usage:
-  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT]
+  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend rust-pure|ffi|subprocess] [--max-new-tokens N]
 
 If paths are omitted, picks the first transformer-only + codec-only pair in models/.
 "#

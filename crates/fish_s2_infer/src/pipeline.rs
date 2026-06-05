@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use fish_s2_core::gguf::GgufFile;
 
 use crate::codec::{
-    decode_waveform, CodecDecoderF16Weights, CodecF16Weights, CodecPostModuleF16Weights,
-    CodecUpsampleF16Weights, CodecWaveformResult,
+    decode_waveform, encode_reference_wav_file, CodecDecoderF16Weights, CodecF16Weights,
+    CodecPostModuleF16Weights, CodecReferenceEncoderF16Weights, CodecUpsampleF16Weights,
+    CodecWaveformResult,
 };
 use crate::error::{InferError, Result};
 use crate::fast_ar::FastArWeights;
@@ -107,6 +108,7 @@ pub struct RustPipeline {
     slow_state: SlowArState,
     fast_weights: FastArWeights,
     rvq_weights: CodecF16Weights,
+    reference_encoder_weights: CodecReferenceEncoderF16Weights,
     post_weights: CodecPostModuleF16Weights,
     upsample_weights: CodecUpsampleF16Weights,
     decoder_weights: CodecDecoderF16Weights,
@@ -133,6 +135,7 @@ impl RustPipeline {
         let codec = GgufFile::open(&config.codec_gguf)
             .map_err(|err| InferError::Message(err.to_string()))?;
         let rvq_weights = CodecF16Weights::from_gguf(&codec)?;
+        let reference_encoder_weights = CodecReferenceEncoderF16Weights::from_gguf(&codec)?;
         let post_weights = CodecPostModuleF16Weights::from_gguf(&codec)?;
         let upsample_weights = CodecUpsampleF16Weights::from_gguf(&codec)?;
         let decoder_weights = CodecDecoderF16Weights::from_gguf(&codec)?;
@@ -143,6 +146,7 @@ impl RustPipeline {
             slow_state,
             fast_weights,
             rvq_weights,
+            reference_encoder_weights,
             post_weights,
             upsample_weights,
             decoder_weights,
@@ -194,6 +198,34 @@ impl RustPipeline {
 
     pub fn graph_spec(&self) -> &DualArGraphSpec {
         &self.graph
+    }
+
+    pub fn encode_reference_wav(&self, path: impl AsRef<Path>) -> Result<PromptCodes> {
+        let result = encode_reference_wav_file(path.as_ref(), &self.reference_encoder_weights)?;
+        let cols = usize::try_from(result.quantizer_frames).map_err(|_| {
+            InferError::Message("reference quantizer_frames overflows usize".into())
+        })?;
+        let num_codebooks = result.num_codebooks;
+        let expected = cols
+            .checked_mul(num_codebooks as usize)
+            .ok_or_else(|| InferError::Message("reference prompt codes length overflow".into()))?;
+        if result.codes.len() != expected {
+            return Err(InferError::Message(format!(
+                "reference prompt codes length mismatch: expected {expected}, got {}",
+                result.codes.len()
+            )));
+        }
+        let mut data = Vec::with_capacity(result.codes.len());
+        for code in result.codes {
+            data.push(u32::try_from(code).map_err(|_| {
+                InferError::Message(format!("reference codebook id is negative: {code}"))
+            })?);
+        }
+        Ok(PromptCodes {
+            num_codebooks,
+            cols,
+            data,
+        })
     }
 }
 
