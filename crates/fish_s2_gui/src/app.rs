@@ -719,6 +719,7 @@ impl FishS2App {
                         "rust-pure",
                     );
                     ui.selectable_value(&mut self.config.server_backend, "ffi".to_string(), "ffi");
+                    #[cfg(feature = "legacy-s2-exe")]
                     ui.selectable_value(
                         &mut self.config.server_backend,
                         "subprocess".to_string(),

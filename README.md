@@ -79,8 +79,10 @@ Available backends:
 ```text
 rust-pure   Pure Rust path, no s2.exe / C++ library
 ffi         Linked s2.cpp backend when built with cpp-engine
-subprocess  Legacy s2.exe fallback
 ```
+
+The legacy external `s2.exe` subprocess backend is hidden from default builds.
+Build with `--features legacy-s2-exe` if you need that compatibility path.
 
 ## GUI
 
@@ -88,8 +90,8 @@ subprocess  Legacy s2.exe fallback
 cargo run --release -p fish_s2_gui
 ```
 
-The Server tab can select `rust-pure`, `ffi`, or `subprocess`, and can set a
-short `max_new_tokens` value for smoke tests. Voice profiles copy
+The Server tab can select `rust-pure` or `ffi` by default, and can set a short
+`max_new_tokens` value for smoke tests. Voice profiles copy
 `reference.wav` and `reference.txt` into the server workdir; RustPure encodes
 those reference files at server load time.
 

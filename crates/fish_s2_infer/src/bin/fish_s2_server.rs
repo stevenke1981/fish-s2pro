@@ -151,9 +151,10 @@ fn print_help() {
         r#"fish_s2_server — in-process S2 Pro inference (Rust)
 
 Usage:
-  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend rust-pure|ffi|subprocess] [--max-new-tokens N]
+  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend {}] [--max-new-tokens N]
 
 If paths are omitted, picks the first transformer-only + codec-only pair in models/.
-"#
+"#,
+        EngineBackend::cli_values()
     );
 }

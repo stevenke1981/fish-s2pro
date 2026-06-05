@@ -78,8 +78,10 @@ Invoke-WebRequest `
 ```text
 rust-pure   純 Rust 路徑，不需要 s2.exe / C++ library
 ffi         使用 cpp-engine 連結 s2.cpp backend
-subprocess  舊的 s2.exe fallback
 ```
+
+舊的外部 `s2.exe` subprocess backend 預設不會出現在 build 中；若需要相容
+路徑，請用 `--features legacy-s2-exe` 建置。
 
 ## GUI
 
@@ -87,10 +89,9 @@ subprocess  舊的 s2.exe fallback
 cargo run --release -p fish_s2_gui
 ```
 
-Server 分頁可選 `rust-pure`、`ffi` 或 `subprocess`，也可設定短測用的
-`max_new_tokens`。Voice profile 會把 `reference.wav` 與 `reference.txt`
-複製到 server workdir；RustPure 會在 server load 時編碼 reference prompt
-codes。
+Server 分頁預設可選 `rust-pure` 或 `ffi`，也可設定短測用的 `max_new_tokens`。
+Voice profile 會把 `reference.wav` 與 `reference.txt` 複製到 server workdir；
+RustPure 會在 server load 時編碼 reference prompt codes。
 
 ## 驗證
 

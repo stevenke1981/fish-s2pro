@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = []
 cpp-engine = ["fish_s2_infer/cpp-engine"]
+legacy-s2-exe = ["fish_s2_core/legacy-s2-exe", "fish_s2_infer/legacy-s2-exe"]
 
 [dependencies]
 fish_s2_core = { path = "../fish_s2_core" }

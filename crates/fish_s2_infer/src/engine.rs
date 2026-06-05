@@ -3,7 +3,9 @@ use std::sync::Mutex;
 
 use crate::error::{InferError, Result};
 use crate::generate::GenerateParams;
-use crate::paths::{default_tokenizer_path, ensure_project_dirs, project_root, server_workdir};
+#[cfg(feature = "legacy-s2-exe")]
+use crate::paths::project_root;
+use crate::paths::{default_tokenizer_path, ensure_project_dirs, server_workdir};
 use crate::pipeline::{RustPipeline, RustPipelineConfig, RustSynthesisOptions};
 use crate::prompt::PromptCodes;
 
@@ -11,6 +13,7 @@ use crate::prompt::PromptCodes;
 pub enum EngineBackend {
     RustPure,
     Ffi,
+    #[cfg(feature = "legacy-s2-exe")]
     Subprocess,
 }
 
@@ -19,9 +22,11 @@ impl EngineBackend {
         match value.to_ascii_lowercase().as_str() {
             "rust" | "rust-pure" | "pure-rust" => Ok(Self::RustPure),
             "ffi" | "cpp" | "native" => Ok(Self::Ffi),
+            #[cfg(feature = "legacy-s2-exe")]
             "subprocess" | "s2" | "s2.exe" => Ok(Self::Subprocess),
             other => Err(InferError::Message(format!(
-                "unknown backend: {other} (expected rust-pure, ffi, or subprocess)"
+                "unknown backend: {other} (expected {})",
+                Self::expected_values()
             ))),
         }
     }
@@ -30,7 +35,30 @@ impl EngineBackend {
         match self {
             Self::RustPure => "rust-pure",
             Self::Ffi => "ffi",
+            #[cfg(feature = "legacy-s2-exe")]
             Self::Subprocess => "subprocess",
+        }
+    }
+
+    pub fn expected_values() -> &'static str {
+        #[cfg(feature = "legacy-s2-exe")]
+        {
+            "rust-pure, ffi, or subprocess"
+        }
+        #[cfg(not(feature = "legacy-s2-exe"))]
+        {
+            "rust-pure or ffi"
+        }
+    }
+
+    pub fn cli_values() -> &'static str {
+        #[cfg(feature = "legacy-s2-exe")]
+        {
+            "rust-pure|ffi|subprocess"
+        }
+        #[cfg(not(feature = "legacy-s2-exe"))]
+        {
+            "rust-pure|ffi"
         }
     }
 }
@@ -180,6 +208,7 @@ impl InferenceEngine {
                     Err(InferError::NativeNotLinked)
                 }
             }
+            #[cfg(feature = "legacy-s2-exe")]
             EngineBackend::Subprocess => Self::synthesize_via_embedded_cli(&self.config, request),
         }
     }
@@ -236,6 +265,7 @@ impl InferenceEngine {
         }
     }
 
+    #[cfg(feature = "legacy-s2-exe")]
     fn synthesize_via_embedded_cli(
         config: &EngineConfig,
         request: &SynthesisRequest,
@@ -281,6 +311,7 @@ impl InferenceEngine {
         std::fs::read(&out_path).map_err(InferError::Io)
     }
 
+    #[cfg(feature = "legacy-s2-exe")]
     fn resolve_s2_binary() -> PathBuf {
         let candidates = [
             project_root().join("bin").join("s2.exe"),
@@ -295,6 +326,7 @@ impl InferenceEngine {
         project_root().join("bin").join("s2.exe")
     }
 
+    #[cfg(feature = "legacy-s2-exe")]
     fn prepare_workdir_models(config: &EngineConfig) -> Result<()> {
         std::fs::create_dir_all(&config.workdir)?;
         link_or_copy(&config.transformer_gguf, &config.workdir.join("model.gguf"))?;
@@ -303,14 +335,14 @@ impl InferenceEngine {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "legacy-s2-exe"))]
 fn link_or_copy(from: &Path, to: &Path) -> Result<()> {
     let _ = std::fs::remove_file(to);
     std::fs::copy(from, to).map_err(InferError::Io)?;
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "legacy-s2-exe"))]
 fn link_or_copy(from: &Path, to: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
     let _ = std::fs::remove_file(to);
@@ -445,10 +477,13 @@ mod tests {
             EngineBackend::RustPure
         );
         assert_eq!(EngineBackend::parse("ffi").unwrap(), EngineBackend::Ffi);
+        #[cfg(feature = "legacy-s2-exe")]
         assert_eq!(
             EngineBackend::parse("subprocess").unwrap(),
             EngineBackend::Subprocess
         );
+        #[cfg(not(feature = "legacy-s2-exe"))]
+        assert!(EngineBackend::parse("subprocess").is_err());
         assert!(EngineBackend::parse("unknown").is_err());
     }
 }

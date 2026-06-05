@@ -57,6 +57,21 @@ fn default_server_backend() -> String {
     "rust-pure".to_string()
 }
 
+fn normalize_server_backend(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return default_server_backend();
+    }
+    #[cfg(not(feature = "legacy-s2-exe"))]
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "subprocess" | "s2" | "s2.exe"
+    ) {
+        return default_server_backend();
+    }
+    trimmed.to_string()
+}
+
 fn default_server_max_new_tokens() -> u32 {
     1
 }
@@ -73,9 +88,7 @@ impl AppConfig {
                 if cfg.models_dir.as_os_str().is_empty() {
                     cfg.models_dir = models_dir();
                 }
-                if cfg.server_backend.trim().is_empty() {
-                    cfg.server_backend = default_server_backend();
-                }
+                cfg.server_backend = normalize_server_backend(&cfg.server_backend);
                 if cfg.server_max_new_tokens == 0 {
                     cfg.server_max_new_tokens = default_server_max_new_tokens();
                 }

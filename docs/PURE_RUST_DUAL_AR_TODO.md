@@ -10,7 +10,7 @@
 | Rust orchestration + HTTP | `crates/fish_s2_infer` (`engine.rs`, `server.rs`) | Done |
 | GGUF load + tensor bytes | `crates/fish_s2_core/src/gguf.rs` | Done (mmap index, F16 views in `fish_s2_infer::tensor`) |
 | C++ FFI shim | `crates/fish_s2_infer/ffi/s2_engine_ffi.{h,cpp}` | Scaffold (needs link to real `s2::Pipeline`) |
-| Fallback CLI | `engine.rs` → `bin/s2.exe` | Works if binary present |
+| Fallback CLI | `engine.rs` → `bin/s2.exe` | Legacy opt-in via `legacy-s2-exe` feature |
 
 **Reference implementation (source of truth for math):**
 
@@ -198,15 +198,15 @@
   - Acceptance: returns valid RIFF and passes Phase 0 envelope parity for the 1-token smoke. Next validation: reference-prompt full E2E WAV or longer generated length.
 - [ ] `fish_s2_infer::engine::Backend::{RustPure,Ffi,Subprocess}`
   - [x] `EngineBackend::{RustPure,Ffi,Subprocess}` added; `EngineConfig::new(...)` defaults to `RustPure`.
-  - [x] `InferenceEngine::load` owns a `Mutex<RustPipeline>` for RustPure, optional FFI native engine for `cpp-engine`, or subprocess fallback.
+  - [x] `InferenceEngine::load` owns a `Mutex<RustPipeline>` for RustPure, optional FFI native engine for `cpp-engine`, or opt-in subprocess fallback via `legacy-s2-exe`.
   - [x] RustPure load-time reference conditioning: if `workdir/reference.wav` + `reference.txt` exist, `InferenceEngine::load` encodes/caches prompt codes for `/v1/tts` requests without changing the HTTP API.
-  - [x] `fish_s2_server --backend rust-pure|ffi|subprocess [--max-new-tokens N]` selects the backend explicitly.
-  - [x] GUI server settings persist `server_backend` and `server_max_new_tokens`; the Server tab can choose `rust-pure`/`ffi`/`subprocess` and short smoke generation length.
+  - [x] `fish_s2_server --backend rust-pure|ffi [--max-new-tokens N]` selects the backend explicitly; `subprocess` is available only with `legacy-s2-exe`.
+  - [x] GUI server settings persist `server_backend` and `server_max_new_tokens`; the Server tab can choose `rust-pure`/`ffi` by default and short smoke generation length.
   - [x] Server-level smoke passed: `fish_s2_server --backend rust-pure --max-new-tokens 1` + POST `/v1/tts` returns valid WAV (`44100 Hz`, mono, `0.04644s`, `rms≈0.188984`).
   - [x] `scripts/smoke_rust_server.ps1` automates release server startup, `/health`, `/v1/tts`, WAV metrics, and cleanup.
   - [x] `scripts/verify_mvp.ps1` provides the MVP acceptance gate (`output/mvp_report.json`), with optional `-RunServerSmoke` to include the slow RustPure HTTP synthesis smoke.
   - Feature-gated backend selection with explicit logs.
-  - Acceptance: GUI/server can choose RustPure when complete, FFI/subprocess fallback otherwise.
+  - Acceptance: GUI/server can choose RustPure when complete, FFI fallback otherwise; subprocess fallback is legacy opt-in only.
 
 ### Package G — GPU Acceleration
 
@@ -344,8 +344,8 @@
 
 *Depends on: Phase 7*
 
-- [ ] **9.1** Remove subprocess fallback or gate behind `legacy-s2-exe` feature.
-- [ ] **9.2** Delete unused `fish_s2_core::server::ServerProcess` if fully deprecated.
+- [x] **9.1** Remove subprocess fallback or gate behind `legacy-s2-exe` feature. Default builds no longer accept/show `subprocess`; `fish_s2_infer`, `fish_s2_core`, and `fish_s2_gui` expose it only through `legacy-s2-exe`.
+- [x] **9.2** Delete unused `fish_s2_core::server::ServerProcess` if fully deprecated. The module is retained only behind `legacy-s2-exe`, so default builds do not compile/export the old external-process launcher.
 - [x] **9.3** Update `models/README.txt` + download script for model sources. `scripts/download_models.ps1` now supports `fishaudio/s2-pro` official checkpoint downloads via `-IncludeOfficialCheckpoint` and GGUF runtime pairs via `-IncludeGguf -Quant ...`; direct Rust inference still uses GGUF while official Safetensors are tokenizer/source/conversion inputs.
 - [x] **9.4** License attribution: `README.md`, `README.zh-TW.md`, `models/README.txt`, and `docs/THIRD_PARTY_NOTICES.md` now distinguish MIT project code from Fish Audio Research License model assets and link upstream model repositories.
 
@@ -383,9 +383,9 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 1. `scripts/verify_mvp.ps1` fast gate passes; optionally run `scripts/verify_mvp.ps1 -RunServerSmoke -MaxNewTokens 1` before release handoff.
 2. `cargo run -p fish_s2_infer --bin fish_s2_server` synthesizes WAV from `models/` **without** C++ binary or static lib.
-3. GUI “Rust 推理引擎” can launch `rust-pure` / `ffi` / `subprocess`, set short smoke `max_new_tokens`, and works on Windows with documented GPU setup.
+3. GUI “Rust 推理引擎” can launch `rust-pure` / `ffi`, set short smoke `max_new_tokens`, and works on Windows with documented GPU setup. Legacy `subprocess` requires `legacy-s2-exe`.
 4. README states license + model download steps.
 
 ---
 
-*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; next product work is release packaging/perf cleanup, optional slow `-RunServerSmoke`, and Phase 8 GPU acceleration.*
+*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; legacy `s2.exe` subprocess fallback is now opt-in via `legacy-s2-exe`; next product work is release packaging/perf cleanup, optional slow `-RunServerSmoke`, and Phase 8 GPU acceleration.*
