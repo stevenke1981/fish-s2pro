@@ -91,6 +91,7 @@ impl FishS2App {
         let mut config = AppConfig::load();
         let _ = config.ensure_dirs();
         let (bg_tx, bg_rx) = mpsc::channel();
+        let auto_backend_message = maybe_promote_cuda_backend(&mut config);
         let scanned = ScannedModels::scan_dir(&config.models_dir, 4).unwrap_or_default();
         let selected_label = config
             .ensure_active_model_pair(&scanned.pairs)
@@ -98,8 +99,11 @@ impl FishS2App {
         let _ = config.save();
         let audio = AudioPlayer::new();
         let script = config.last_script.clone();
-        let status_line =
+        let mut status_line =
             model_scan_status(&config.models_dir, &scanned, selected_label.as_deref());
+        if let Some(message) = auto_backend_message {
+            status_line = format!("{status_line}；{message}");
+        }
         Self {
             tab: Tab::Generate,
             rust_server: None,
@@ -404,6 +408,12 @@ impl FishS2App {
             &mut self.synthesis_log,
             &backend_device_line(backend, self.config.cuda_device),
         );
+        if backend == EngineBackend::RustPure && self.config.server_max_new_tokens > 4 {
+            append_log_line(
+                &mut self.synthesis_log,
+                "警告：目前後端是 rust-pure CPU，tokens>4 會非常慢；CUDA 版請切到 ffi-cuda。",
+            );
+        }
         self.status_line = "正在準備原生 Rust 引擎…".to_string();
         let output_dir = self.config.output_dir.clone();
         let key = NativeRustEngineKey {
@@ -1235,6 +1245,17 @@ fn backend_device_line(backend: EngineBackend, cuda_device: i32) -> String {
     } else {
         "CUDA：未使用".to_string()
     }
+}
+
+fn maybe_promote_cuda_backend(config: &mut AppConfig) -> Option<String> {
+    if !fish_s2_infer::cpp_engine_linked() {
+        return None;
+    }
+    if config.server_backend != "rust-pure" {
+        return None;
+    }
+    config.server_backend = "ffi-cuda".to_string();
+    Some("已偵測 CUDA/cpp-engine 版，後端自動切換為 ffi-cuda".to_string())
 }
 
 fn wav_warning(analysis: &WavAnalysis, max_new_tokens: u32) -> Option<String> {

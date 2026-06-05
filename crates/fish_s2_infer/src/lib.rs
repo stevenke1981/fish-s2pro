@@ -41,7 +41,9 @@ pub use codec::{
     CODEC_ENCODER_KERNELS, CODEC_ENCODER_RATES, CODEC_ENCODER_TRANSFORMER_WINDOW_SIZE,
     CODEC_FRAME_LENGTH, CODEC_RESIDUAL_QUANTIZERS, CODEC_SAMPLE_RATE, CODEC_TRANSFORMER_LAYERS,
 };
-pub use engine::{EngineBackend, EngineConfig, InferenceEngine, SynthesisRequest};
+pub use engine::{
+    cpp_engine_linked, EngineBackend, EngineConfig, InferenceEngine, SynthesisRequest,
+};
 pub use error::{InferError, Result};
 pub use fast_ar::{
     forward_codebook_prefix, generate_codebooks_for_semantic, FastArHeadF16Weights,

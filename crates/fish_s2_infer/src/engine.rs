@@ -74,6 +74,10 @@ impl EngineBackend {
     }
 }
 
+pub fn cpp_engine_linked() -> bool {
+    cfg!(s2_cpp_linked)
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub transformer_gguf: PathBuf,
