@@ -73,7 +73,7 @@ fn normalize_server_backend(value: &str) -> String {
 }
 
 fn default_server_max_new_tokens() -> u32 {
-    1
+    32
 }
 
 impl AppConfig {

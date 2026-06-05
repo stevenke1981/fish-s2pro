@@ -47,6 +47,15 @@ struct NativeRustEngineCache {
     engine: Arc<Mutex<Option<InferenceEngine>>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WavAnalysis {
+    sample_rate: u32,
+    channels: u16,
+    duration_secs: f64,
+    rms: f64,
+    peak: f64,
+}
+
 pub struct FishS2App {
     config: AppConfig,
     tab: Tab,
@@ -133,6 +142,30 @@ impl FishS2App {
                     self.last_wav = Some(bytes.clone());
                     self.last_wav_path = Some(path.clone());
                     self.status_line = format!("已生成：{}", path.display());
+                    if let Some(analysis) = analyze_wav_bytes(&bytes) {
+                        append_log_line(
+                            &mut self.synthesis_log,
+                            &format!(
+                                "WAV 診斷：{} Hz / {}ch / {:.3}s / RMS {:.6} / peak {:.6}",
+                                analysis.sample_rate,
+                                analysis.channels,
+                                analysis.duration_secs,
+                                analysis.rms,
+                                analysis.peak
+                            ),
+                        );
+                        if let Some(warning) =
+                            wav_warning(&analysis, self.config.server_max_new_tokens)
+                        {
+                            self.status_line = warning.clone();
+                            append_log_line(&mut self.synthesis_log, &format!("警告：{warning}"));
+                        }
+                    } else {
+                        append_log_line(
+                            &mut self.synthesis_log,
+                            "WAV 診斷：無法解析 PCM16 WAV header",
+                        );
+                    }
                     append_log_line(
                         &mut self.synthesis_log,
                         &format!("完成：已寫出 {} bytes 到 {}", bytes.len(), path.display()),
@@ -598,11 +631,25 @@ impl FishS2App {
         ui.label("輸入文字並使用 [tag] 控制語氣（S2 Pro 支援 15000+ 種自然語言標籤）。");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.config.use_rust_engine, "原生 Rust 直接生成");
+            ui.label("生成 token");
+            let token_changed = ui
+                .add(egui::DragValue::new(&mut self.config.server_max_new_tokens).range(1..=2048))
+                .changed();
+            if token_changed {
+                self.native_rust_engine = None;
+                self.persist();
+            }
             if ui.button("儲存設定").clicked() {
                 self.persist();
                 self.status_line = "設定已儲存".to_string();
             }
         });
+        if self.config.server_max_new_tokens <= 1 {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "目前 token=1 只會產生極短 smoke WAV，通常聽起來像沒有聲音。",
+            );
+        }
         ui.add(
             egui::TextEdit::multiline(&mut self.script)
                 .desired_width(f32::INFINITY)
@@ -1094,7 +1141,7 @@ fn send_status(tx: &Sender<BackgroundMsg>, line: impl Into<String>) {
 }
 
 fn send_debug(tx: &Sender<BackgroundMsg>, line: &str) {
-    let _ = tx.send(BackgroundMsg::SynthesisLog(timestamped_log_line(line)));
+    let _ = tx.send(BackgroundMsg::SynthesisLog(line.to_string()));
 }
 
 fn append_log_line(log: &mut String, line: &str) {
@@ -1113,5 +1160,157 @@ fn format_elapsed(duration: Duration) -> String {
         format!("{:.2}s", duration.as_secs_f64())
     } else {
         format!("{}ms", duration.as_millis())
+    }
+}
+
+fn wav_warning(analysis: &WavAnalysis, max_new_tokens: u32) -> Option<String> {
+    if analysis.duration_secs < 0.5 {
+        return Some(format!(
+            "生成的 WAV 只有 {:.3}s，太短所以幾乎聽不到。max_new_tokens={max_new_tokens} 只適合 smoke/debug，請在「生成 token」調高後再試。",
+            analysis.duration_secs
+        ));
+    }
+    if analysis.rms < 0.001 || analysis.peak < 0.002 {
+        return Some(format!(
+            "生成的 WAV 音量接近靜音：RMS {:.6}, peak {:.6}。請檢查 prompt/reference 或提高生成 token 後再試。",
+            analysis.rms, analysis.peak
+        ));
+    }
+    None
+}
+
+fn analyze_wav_bytes(bytes: &[u8]) -> Option<WavAnalysis> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut offset = 12usize;
+    let mut audio_format = None;
+    let mut channels = None;
+    let mut sample_rate = None;
+    let mut bits_per_sample = None;
+    let mut data_range = None;
+
+    while offset.checked_add(8)? <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
+        let chunk_start = offset + 8;
+        let chunk_end = chunk_start.checked_add(size)?;
+        if chunk_end > bytes.len() {
+            return None;
+        }
+
+        match id {
+            b"fmt " if size >= 16 => {
+                audio_format = Some(u16::from_le_bytes(
+                    bytes[chunk_start..chunk_start + 2].try_into().ok()?,
+                ));
+                channels = Some(u16::from_le_bytes(
+                    bytes[chunk_start + 2..chunk_start + 4].try_into().ok()?,
+                ));
+                sample_rate = Some(u32::from_le_bytes(
+                    bytes[chunk_start + 4..chunk_start + 8].try_into().ok()?,
+                ));
+                bits_per_sample = Some(u16::from_le_bytes(
+                    bytes[chunk_start + 14..chunk_start + 16].try_into().ok()?,
+                ));
+            }
+            b"data" => {
+                data_range = Some(chunk_start..chunk_end);
+            }
+            _ => {}
+        }
+
+        offset = chunk_end + (size % 2);
+    }
+
+    if audio_format? != 1 || bits_per_sample? != 16 {
+        return None;
+    }
+    let channels = channels?;
+    let sample_rate = sample_rate?;
+    if channels == 0 || sample_rate == 0 {
+        return None;
+    }
+
+    let data = &bytes[data_range?];
+    let sample_width = 2usize;
+    let frame_width = sample_width.checked_mul(channels as usize)?;
+    let frames = data.len() / frame_width;
+    if frames == 0 {
+        return Some(WavAnalysis {
+            sample_rate,
+            channels,
+            duration_secs: 0.0,
+            rms: 0.0,
+            peak: 0.0,
+        });
+    }
+
+    let mut square_sum = 0.0f64;
+    let mut peak = 0.0f64;
+    let mut sample_count = 0usize;
+    for chunk in data.chunks_exact(2) {
+        let value = i16::from_le_bytes([chunk[0], chunk[1]]) as f64 / 32768.0;
+        square_sum += value * value;
+        peak = peak.max(value.abs());
+        sample_count += 1;
+    }
+
+    Some(WavAnalysis {
+        sample_rate,
+        channels,
+        duration_secs: frames as f64 / sample_rate as f64,
+        rms: (square_sum / sample_count as f64).sqrt(),
+        peak,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analyzes_pcm16_wav_duration_and_level() {
+        let wav = test_wav(&[0, 16_384, -16_384, 0], 44_100, 1);
+        let analysis = analyze_wav_bytes(&wav).unwrap();
+        assert_eq!(analysis.sample_rate, 44_100);
+        assert_eq!(analysis.channels, 1);
+        assert!((analysis.duration_secs - (4.0 / 44_100.0)).abs() < 1e-9);
+        assert!(analysis.rms > 0.3);
+        assert!(analysis.peak > 0.49);
+    }
+
+    #[test]
+    fn warns_when_wav_is_too_short() {
+        let wav = test_wav(&[0; 2048], 44_100, 1);
+        let analysis = analyze_wav_bytes(&wav).unwrap();
+        let warning = wav_warning(&analysis, 1).unwrap();
+        assert!(warning.contains("太短"));
+        assert!(warning.contains("max_new_tokens=1"));
+    }
+
+    fn test_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
+        let data_len = samples.len() * 2;
+        let mut bytes = Vec::with_capacity(44 + data_len);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36u32 + data_len as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * channels as u32 * 2;
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        let block_align = channels * 2;
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
     }
 }
