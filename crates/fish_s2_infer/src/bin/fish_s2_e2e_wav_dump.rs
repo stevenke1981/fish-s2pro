@@ -24,6 +24,10 @@ struct E2eWavDump {
     latent_frames: u32,
     sample_rate: u32,
     num_samples: usize,
+    samples_l2: f64,
+    samples_mean_abs: f64,
+    samples_max_abs: f64,
+    samples_first8: Vec<f64>,
     wav_bytes: usize,
 }
 
@@ -121,6 +125,16 @@ fn main() -> fish_s2_infer::Result<()> {
             latent_frames: result.waveform.latent_frames,
             sample_rate: result.waveform.sample_rate,
             num_samples: result.waveform.num_samples,
+            samples_l2: l2(&result.waveform.samples),
+            samples_mean_abs: mean_abs(&result.waveform.samples),
+            samples_max_abs: max_abs(&result.waveform.samples),
+            samples_first8: result
+                .waveform
+                .samples
+                .iter()
+                .take(8)
+                .map(|value| f64::from(*value))
+                .collect(),
             wav_bytes: result.wav_bytes.len(),
         },
     )?;
@@ -286,6 +300,35 @@ fn write_json<T: serde::Serialize>(path: &PathBuf, value: &T) -> fish_s2_infer::
     file.write_all(json.as_bytes())?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+fn l2(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|value| {
+            let v = f64::from(*value);
+            v * v
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn mean_abs(values: &[f32]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values
+        .iter()
+        .map(|value| f64::from(value.abs()))
+        .sum::<f64>()
+        / values.len() as f64
+}
+
+fn max_abs(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|value| f64::from(value.abs()))
+        .fold(0.0, f64::max)
 }
 
 fn parse_int_err(err: std::num::ParseIntError) -> InferError {
