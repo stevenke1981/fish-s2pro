@@ -9,7 +9,7 @@ use fish_s2_core::{
     ConvertPlan, GgufSummary, ModelPair, ScannedModels, TtsClient, TtsRequest, VoiceProfile,
     CONTROL_TAGS,
 };
-use fish_s2_infer::{EngineBackend, EngineConfig, InferenceEngine};
+use fish_s2_infer::{EngineBackend, EngineConfig, InferenceEngine, SynthesisRequest};
 use uuid::Uuid;
 
 use crate::audio::AudioPlayer;
@@ -225,6 +225,65 @@ impl FishS2App {
     }
 
     fn run_tts(&mut self) {
+        if self.config.use_rust_engine {
+            self.run_native_rust_tts();
+        } else {
+            self.run_server_tts();
+        }
+    }
+
+    fn run_native_rust_tts(&mut self) {
+        let pair = match self.active_pair() {
+            Some(p) => p.clone(),
+            None => {
+                self.status_line =
+                    "請先在「模型」分頁選擇一組 transformer + codec GGUF".to_string();
+                return;
+            }
+        };
+        if let Err(e) = validate_pair(&pair) {
+            self.status_line = e.to_string();
+            return;
+        }
+        let text = self.script.trim().to_string();
+        if text.is_empty() {
+            self.status_line = "請輸入要合成的文字".to_string();
+            return;
+        }
+
+        let voice = self.config.active_voice().cloned();
+        self.busy = true;
+        self.status_line = "正在使用原生 Rust 引擎合成語音…".to_string();
+        let output_dir = self.config.output_dir.clone();
+        let workdir = self.config.server_workdir.clone();
+        let max_new_tokens = self.config.server_max_new_tokens;
+        let tx = self.bg_tx.clone();
+        thread::spawn(move || {
+            let result = (|| {
+                std::fs::create_dir_all(&output_dir)?;
+                let mut engine_cfg =
+                    EngineConfig::new(pair.transformer.path.clone(), pair.codec.path.clone())?;
+                engine_cfg.backend = EngineBackend::RustPure;
+                engine_cfg.workdir = workdir;
+                engine_cfg.generate_params.max_new_tokens = max_new_tokens;
+                let engine = InferenceEngine::load(engine_cfg)?;
+                let request = SynthesisRequest {
+                    text,
+                    reference_wav: voice.as_ref().map(|v| v.reference_wav.clone()),
+                    reference_text: voice.as_ref().map(|v| v.reference_text.clone()),
+                };
+                let bytes = engine.synthesize_wav(&request)?;
+                let filename = format!("tts_{}.wav", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+                let path = output_dir.join(filename);
+                std::fs::write(&path, &bytes)?;
+                Ok::<_, fish_s2_infer::InferError>((bytes, path))
+            })()
+            .map_err(|e| e.to_string());
+            let _ = tx.send(BackgroundMsg::TtsDone(result));
+        });
+    }
+
+    fn run_server_tts(&mut self) {
         if !self.server_running() {
             self.status_line = "請先啟動 Rust 推理伺服器".to_string();
             return;
@@ -346,6 +405,13 @@ impl eframe::App for FishS2App {
 impl FishS2App {
     fn ui_generate(&mut self, ui: &mut egui::Ui) {
         ui.label("輸入文字並使用 [tag] 控制語氣（S2 Pro 支援 15000+ 種自然語言標籤）。");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.config.use_rust_engine, "原生 Rust 直接生成");
+            if ui.button("儲存設定").clicked() {
+                self.persist();
+                self.status_line = "設定已儲存".to_string();
+            }
+        });
         ui.add(
             egui::TextEdit::multiline(&mut self.script)
                 .desired_width(f32::INFINITY)

@@ -95,9 +95,13 @@ ffi         使用 cpp-engine 連結 s2.cpp backend
 cargo run --release -p fish_s2_gui
 ```
 
+「語音生成」分頁預設使用 `原生 Rust 直接生成`：會用選定的 GGUF pair 在
+process 內載入 `rust-pure` backend，輸出 WAV 到 `output/` 並播放，不需要先
+啟動 HTTP server。取消該選項時，會保留 Server 分頁 + `/v1/tts` 的舊流程。
+
 Server 分頁預設可選 `rust-pure` 或 `ffi`，也可設定短測用的 `max_new_tokens`。
-Voice profile 會把 `reference.wav` 與 `reference.txt` 複製到 server workdir；
-RustPure 會在 server load 時編碼 reference prompt codes。
+Voice profile 會直接傳給 Rust path 做 prompt-code encode，也可套用到 server
+workdir 供 server 啟動時使用。
 
 ## MVP Package
 

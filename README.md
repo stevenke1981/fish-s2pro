@@ -96,10 +96,15 @@ Build with `--features legacy-s2-exe` if you need that compatibility path.
 cargo run --release -p fish_s2_gui
 ```
 
+The Generate tab defaults to `Native Rust direct generation`, which loads the
+selected GGUF pair in-process through the `rust-pure` backend, writes the WAV to
+`output/`, and plays it without starting the HTTP server first. Disable that
+toggle to use the Server tab + `/v1/tts` workflow instead.
+
 The Server tab can select `rust-pure` or `ffi` by default, and can set a short
-`max_new_tokens` value for smoke tests. Voice profiles copy
-`reference.wav` and `reference.txt` into the server workdir; RustPure encodes
-those reference files at server load time.
+`max_new_tokens` value for smoke tests. Voice profiles are passed into the
+direct Rust path for prompt-code encoding, and can also be copied into the
+server workdir for server startup.
 
 ## MVP Package
 
