@@ -5,6 +5,7 @@ use crate::error::{InferError, Result};
 use crate::generate::GenerateParams;
 use crate::paths::{default_tokenizer_path, ensure_project_dirs, project_root, server_workdir};
 use crate::pipeline::{RustPipeline, RustPipelineConfig, RustSynthesisOptions};
+use crate::prompt::PromptCodes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineBackend {
@@ -83,10 +84,17 @@ pub struct SynthesisRequest {
     pub reference_wav: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedReference {
+    text: String,
+    prompt_codes: PromptCodes,
+}
+
 /// Rust-facing inference engine (replaces external `s2.exe` process).
 pub struct InferenceEngine {
     config: EngineConfig,
     rust_pipeline: Option<Mutex<RustPipeline>>,
+    default_reference: Option<CachedReference>,
     #[cfg(s2_cpp_linked)]
     native: Option<Mutex<native::NativeEngine>>,
 }
@@ -101,13 +109,15 @@ impl InferenceEngine {
             )));
         }
 
-        let rust_pipeline = if config.backend == EngineBackend::RustPure {
-            Some(Mutex::new(RustPipeline::load(
+        let (rust_pipeline, default_reference) = if config.backend == EngineBackend::RustPure {
+            let pipeline = RustPipeline::load(
                 RustPipelineConfig::new(&config.transformer_gguf, &config.codec_gguf)
                     .with_tokenizer(&config.tokenizer_path),
-            )?))
+            )?;
+            let default_reference = Self::load_workdir_reference(&pipeline, &config.workdir)?;
+            (Some(Mutex::new(pipeline)), default_reference)
         } else {
-            None
+            (None, None)
         };
 
         #[cfg(not(s2_cpp_linked))]
@@ -125,6 +135,7 @@ impl InferenceEngine {
         Ok(Self {
             config,
             rust_pipeline,
+            default_reference,
             #[cfg(s2_cpp_linked)]
             native,
         })
@@ -189,7 +200,12 @@ impl InferenceEngine {
                 let prompt_codes = pipeline.encode_reference_wav(wav)?;
                 options = options.with_reference(text.clone(), prompt_codes);
             }
-            (None, None) => {}
+            (None, None) => {
+                if let Some(reference) = &self.default_reference {
+                    options = options
+                        .with_reference(reference.text.clone(), reference.prompt_codes.clone());
+                }
+            }
             _ => {
                 return Err(InferError::Message(
                     "reference_wav and reference_text must both be set for RustPure".into(),
@@ -198,6 +214,26 @@ impl InferenceEngine {
         }
 
         Ok(pipeline.synthesize(&options)?.wav_bytes)
+    }
+
+    fn load_workdir_reference(
+        pipeline: &RustPipeline,
+        workdir: &Path,
+    ) -> Result<Option<CachedReference>> {
+        let wav = workdir.join("reference.wav");
+        let text_path = workdir.join("reference.txt");
+        match (wav.is_file(), text_path.is_file()) {
+            (false, false) => Ok(None),
+            (true, true) => {
+                let text = std::fs::read_to_string(&text_path)?;
+                let prompt_codes = pipeline.encode_reference_wav(&wav)?;
+                Ok(Some(CachedReference { text, prompt_codes }))
+            }
+            _ => Err(InferError::Message(format!(
+                "reference.wav and reference.txt must both exist in {}",
+                workdir.display()
+            ))),
+        }
     }
 
     fn synthesize_via_embedded_cli(

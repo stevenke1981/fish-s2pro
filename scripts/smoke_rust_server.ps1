@@ -5,6 +5,8 @@ param(
     [int] $Port = 18081,
     [int] $MaxNewTokens = 1,
     [string] $Backend = "rust-pure",
+    [string] $ReferenceWav,
+    [string] $ReferenceText,
     [string] $OutputWav = (Join-Path (Split-Path $PSScriptRoot -Parent) "output\server_smoke_hi.wav"),
     [int] $StartupTimeoutSeconds = 180,
     [int] $RequestTimeoutSeconds = 1200
@@ -18,6 +20,7 @@ $outDir = Join-Path $root "output"
 $stdout = Join-Path $outDir "server_smoke_stdout.txt"
 $stderr = Join-Path $outDir "server_smoke_stderr.txt"
 $pidPath = Join-Path $outDir "server_smoke_pid.txt"
+$workdir = Join-Path $root "runtime\s2_server"
 $server = $null
 
 function Test-RequiredFile {
@@ -43,7 +46,19 @@ try {
     Test-RequiredFile "transformer GGUF" $Transformer
     Test-RequiredFile "codec GGUF" $Codec
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $workdir | Out-Null
     Remove-Item -LiteralPath $stdout, $stderr, $OutputWav, $pidPath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $workdir "reference.wav"), (Join-Path $workdir "reference.txt") -ErrorAction SilentlyContinue
+
+    if ($ReferenceWav -or $ReferenceText) {
+        if (-not ($ReferenceWav -and $ReferenceText)) {
+            throw "-ReferenceWav and -ReferenceText must both be set"
+        }
+        Test-RequiredFile "reference wav" $ReferenceWav
+        Copy-Item -LiteralPath $ReferenceWav -Destination (Join-Path $workdir "reference.wav") -Force
+        Write-Utf8NoBom (Join-Path $workdir "reference.txt") $ReferenceText
+        Write-Host "using reference conditioning from $ReferenceWav"
+    }
 
     cargo build --release -p fish_s2_infer --bin fish_s2_server
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
