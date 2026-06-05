@@ -348,6 +348,7 @@
 - [x] **9.2** Delete unused `fish_s2_core::server::ServerProcess` if fully deprecated. The module is retained only behind `legacy-s2-exe`, so default builds do not compile/export the old external-process launcher.
 - [x] **9.3** Update `models/README.txt` + download script for model sources. `scripts/download_models.ps1` now supports `fishaudio/s2-pro` official checkpoint downloads via `-IncludeOfficialCheckpoint` and GGUF runtime pairs via `-IncludeGguf -Quant ...`; direct Rust inference still uses GGUF while official Safetensors are tokenizer/source/conversion inputs.
 - [x] **9.4** License attribution: `README.md`, `README.zh-TW.md`, `models/README.txt`, and `docs/THIRD_PARTY_NOTICES.md` now distinguish MIT project code from Fish Audio Research License model assets and link upstream model repositories.
+- [x] **9.5** MVP packaging script: `scripts/package_mvp.ps1` builds release GUI/server binaries and writes `dist/fish-s2pro-mvp/` with package-local launch/smoke scripts, model download helper, manifest, and license/model notes. Model weights/tokenizer are intentionally excluded.
 
 ---
 
@@ -385,7 +386,8 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 2. `cargo run -p fish_s2_infer --bin fish_s2_server` synthesizes WAV from `models/` **without** C++ binary or static lib.
 3. GUI “Rust 推理引擎” can launch `rust-pure` / `ffi`, set short smoke `max_new_tokens`, and works on Windows with documented GPU setup. Legacy `subprocess` requires `legacy-s2-exe`.
 4. README states license + model download steps.
+5. `scripts/package_mvp.ps1 -RunVerify` produces a local MVP package under `dist/`.
 
 ---
 
-*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; legacy `s2.exe` subprocess fallback is now opt-in via `legacy-s2-exe`; next product work is release packaging/perf cleanup, optional slow `-RunServerSmoke`, and Phase 8 GPU acceleration.*
+*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; legacy `s2.exe` subprocess fallback is now opt-in via `legacy-s2-exe`; `scripts/package_mvp.ps1` produces a local MVP package under `dist/`; next product work is optional slow `-RunServerSmoke`, broader release polish, and Phase 8 GPU acceleration.*

@@ -95,6 +95,19 @@ The Server tab can select `rust-pure` or `ffi` by default, and can set a short
 `reference.wav` and `reference.txt` into the server workdir; RustPure encodes
 those reference files at server load time.
 
+## MVP Package
+
+Build a redistributable local MVP folder:
+
+```powershell
+.\scripts\package_mvp.ps1 -RunVerify
+```
+
+This creates `dist\fish-s2pro-mvp\` with the release GUI/server binaries,
+package-local launch/smoke scripts, model download helper, and license/model
+notes. Add `-Archive` to also write `dist\fish-s2pro-mvp.zip`. Model weights and
+tokenizer assets are intentionally not bundled.
+
 ## Validation
 
 MVP acceptance gate:

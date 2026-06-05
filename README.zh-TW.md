@@ -93,6 +93,19 @@ Server 分頁預設可選 `rust-pure` 或 `ffi`，也可設定短測用的 `max_
 Voice profile 會把 `reference.wav` 與 `reference.txt` 複製到 server workdir；
 RustPure 會在 server load 時編碼 reference prompt codes。
 
+## MVP Package
+
+建立可交付的本機 MVP 目錄：
+
+```powershell
+.\scripts\package_mvp.ps1 -RunVerify
+```
+
+這會產生 `dist\fish-s2pro-mvp\`，內容包含 release GUI/server binaries、
+package-local 啟動與 smoke 腳本、模型下載 helper，以及授權/模型說明。加上
+`-Archive` 可另外輸出 `dist\fish-s2pro-mvp.zip`。模型權重與 tokenizer 資產
+不會被打包進去。
+
 ## 驗證
 
 MVP 驗收 gate：

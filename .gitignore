@@ -12,6 +12,7 @@
 
 # Generated outputs and native build artifacts.
 /output/
+/dist/
 /bin/s2.exe
 /bin/s2
 /terminals/
