@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use fish_s2_core::{
@@ -27,6 +27,7 @@ enum Tab {
 
 enum BackgroundMsg {
     Status(String),
+    SynthesisLog(String),
     TtsDone(Result<(Vec<u8>, PathBuf), String>),
     ConvertDone(Result<String, String>),
     ScanDone(ScannedModels),
@@ -60,6 +61,7 @@ pub struct FishS2App {
     convert_log: String,
     convert_dtype: String,
     server_log: String,
+    synthesis_log: String,
     last_wav: Option<Vec<u8>>,
     last_wav_path: Option<PathBuf>,
     audio: Option<AudioPlayer>,
@@ -98,6 +100,7 @@ impl FishS2App {
             convert_log: String::new(),
             convert_dtype: "f16".to_string(),
             server_log: String::new(),
+            synthesis_log: String::new(),
             last_wav: None,
             last_wav_path: None,
             audio,
@@ -122,19 +125,30 @@ impl FishS2App {
                 BackgroundMsg::Status(line) => {
                     self.status_line = line;
                 }
+                BackgroundMsg::SynthesisLog(line) => {
+                    append_log_line(&mut self.synthesis_log, &line);
+                }
                 BackgroundMsg::TtsDone(Ok((bytes, path))) => {
                     self.busy = false;
                     self.last_wav = Some(bytes.clone());
                     self.last_wav_path = Some(path.clone());
                     self.status_line = format!("已生成：{}", path.display());
+                    append_log_line(
+                        &mut self.synthesis_log,
+                        &format!("完成：已寫出 {} bytes 到 {}", bytes.len(), path.display()),
+                    );
                     if let Some(player) = &self.audio {
                         if let Err(e) = player.play_wav_bytes(&bytes) {
                             self.status_line = format!("已儲存但播放失敗：{e}");
+                            append_log_line(&mut self.synthesis_log, &format!("播放失敗：{e}"));
+                        } else {
+                            append_log_line(&mut self.synthesis_log, "播放：已送出 WAV 到音訊裝置");
                         }
                     }
                 }
                 BackgroundMsg::TtsDone(Err(e)) => {
                     self.busy = false;
+                    append_log_line(&mut self.synthesis_log, &format!("失敗：{e}"));
                     self.status_line = e;
                 }
                 BackgroundMsg::ConvertDone(Ok(log)) => {
@@ -309,6 +323,29 @@ impl FishS2App {
 
         let voice = self.config.active_voice().cloned();
         self.busy = true;
+        self.synthesis_log.clear();
+        append_log_line(&mut self.synthesis_log, "開始：原生 Rust 直接生成");
+        append_log_line(&mut self.synthesis_log, &format!("模型：{}", pair.label));
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!("Transformer：{}", pair.transformer.path.display()),
+        );
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!("Codec：{}", pair.codec.path.display()),
+        );
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!(
+                "文字：{} bytes / {} chars",
+                text.len(),
+                text.chars().count()
+            ),
+        );
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!("max_new_tokens：{}", self.config.server_max_new_tokens),
+        );
         self.status_line = "正在準備原生 Rust 引擎…".to_string();
         let output_dir = self.config.output_dir.clone();
         let key = NativeRustEngineKey {
@@ -320,8 +357,10 @@ impl FishS2App {
         let engine_slot = self.native_engine_slot(key.clone());
         let tx = self.bg_tx.clone();
         thread::spawn(move || {
+            let total_start = Instant::now();
             let result = (|| {
                 std::fs::create_dir_all(&output_dir)?;
+                send_debug(&tx, &format!("輸出目錄：{}", output_dir.display()));
                 let mut engine_guard = engine_slot.lock().map_err(|_| {
                     fish_s2_infer::InferError::Message("原生 Rust 引擎鎖定失敗".into())
                 })?;
@@ -330,28 +369,60 @@ impl FishS2App {
                         &tx,
                         "首次使用原生 Rust：正在載入 GGUF 與 tokenizer，之後同模型會快很多…",
                     );
+                    send_debug(&tx, "載入：開始建立 RustPure InferenceEngine");
+                    let load_start = Instant::now();
                     let mut engine_cfg =
                         EngineConfig::new(pair.transformer.path.clone(), pair.codec.path.clone())?;
                     engine_cfg.backend = EngineBackend::RustPure;
                     engine_cfg.workdir = key.workdir.clone();
                     engine_cfg.generate_params.max_new_tokens = key.max_new_tokens;
+                    send_debug(&tx, &format!("工作目錄：{}", engine_cfg.workdir.display()));
+                    send_debug(
+                        &tx,
+                        &format!("tokenizer：{}", engine_cfg.tokenizer_path.display()),
+                    );
                     *engine_guard = Some(InferenceEngine::load(engine_cfg)?);
+                    send_debug(
+                        &tx,
+                        &format!("載入：完成，用時 {}", format_elapsed(load_start.elapsed())),
+                    );
                     send_status(&tx, "原生 Rust 引擎已載入，正在合成語音…");
                 } else {
                     send_status(&tx, "正在使用已載入的原生 Rust 引擎合成語音…");
+                    send_debug(&tx, "載入：重用已快取的 RustPure InferenceEngine");
                 }
                 let request = SynthesisRequest {
                     text,
                     reference_wav: voice.as_ref().map(|v| v.reference_wav.clone()),
                     reference_text: voice.as_ref().map(|v| v.reference_text.clone()),
                 };
+                if let Some(wav) = &request.reference_wav {
+                    send_debug(&tx, &format!("Reference WAV：{}", wav.display()));
+                } else {
+                    send_debug(&tx, "Reference：未選擇 voice profile，使用預設提示");
+                }
                 let engine = engine_guard.as_ref().ok_or_else(|| {
                     fish_s2_infer::InferError::Message("原生 Rust 引擎尚未載入".into())
                 })?;
+                send_debug(&tx, "合成：開始 Slow-AR / Fast-AR / codec decode");
+                let synth_start = Instant::now();
                 let bytes = engine.synthesize_wav(&request)?;
+                send_debug(
+                    &tx,
+                    &format!(
+                        "合成：完成，用時 {}，WAV {} bytes",
+                        format_elapsed(synth_start.elapsed()),
+                        bytes.len()
+                    ),
+                );
                 let filename = format!("tts_{}.wav", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
                 let path = output_dir.join(filename);
+                send_debug(&tx, &format!("寫檔：{}", path.display()));
                 std::fs::write(&path, &bytes)?;
+                send_debug(
+                    &tx,
+                    &format!("總耗時：{}", format_elapsed(total_start.elapsed())),
+                );
                 Ok::<_, fish_s2_infer::InferError>((bytes, path))
             })()
             .map_err(|e| e.to_string());
@@ -387,11 +458,29 @@ impl FishS2App {
             return;
         }
         self.busy = true;
+        self.synthesis_log.clear();
+        append_log_line(&mut self.synthesis_log, "開始：HTTP server /v1/tts 生成");
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!(
+                "Endpoint：http://127.0.0.1:{}/v1/tts",
+                self.config.server_port
+            ),
+        );
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!(
+                "文字：{} bytes / {} chars",
+                text.len(),
+                text.chars().count()
+            ),
+        );
         self.status_line = "正在合成語音…".to_string();
         let port = self.config.server_port;
         let output_dir = self.config.output_dir.clone();
         let tx = self.bg_tx.clone();
         thread::spawn(move || {
+            let start = Instant::now();
             let client = TtsClient::new(port);
             let req = TtsRequest {
                 text,
@@ -399,10 +488,19 @@ impl FishS2App {
             };
             let filename = format!("tts_{}.wav", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
             let path = output_dir.join(filename);
+            send_debug(&tx, &format!("HTTP：POST /v1/tts，輸出 {}", path.display()));
             let result = client
                 .synthesize_to_file(&req, path)
                 .map(|r| {
                     let path = r.saved_path.unwrap_or_default();
+                    send_debug(
+                        &tx,
+                        &format!(
+                            "HTTP：完成，用時 {}，WAV {} bytes",
+                            format_elapsed(start.elapsed()),
+                            r.wav_bytes.len()
+                        ),
+                    );
                     (r.wav_bytes, path)
                 })
                 .map_err(|e| e.to_string());
@@ -555,6 +653,24 @@ impl FishS2App {
         if let Some(path) = &self.last_wav_path {
             ui.label(format!("最近輸出：{}", path.display()));
         }
+
+        ui.separator();
+        ui.collapsing("合成除錯紀錄", |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("清除紀錄").clicked() {
+                    self.synthesis_log.clear();
+                }
+                if let Some(path) = &self.last_wav_path {
+                    ui.label(format!("輸出：{}", path.display()));
+                }
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut self.synthesis_log)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(12)
+                    .font(egui::TextStyle::Monospace),
+            );
+        });
 
         ui.separator();
         ui.collapsing("目前聲音設定", |ui| {
@@ -975,4 +1091,27 @@ fn missing_model_pair_message(models_dir: &std::path::Path, scanned: &ScannedMod
 
 fn send_status(tx: &Sender<BackgroundMsg>, line: impl Into<String>) {
     let _ = tx.send(BackgroundMsg::Status(line.into()));
+}
+
+fn send_debug(tx: &Sender<BackgroundMsg>, line: &str) {
+    let _ = tx.send(BackgroundMsg::SynthesisLog(timestamped_log_line(line)));
+}
+
+fn append_log_line(log: &mut String, line: &str) {
+    if !log.is_empty() {
+        log.push('\n');
+    }
+    log.push_str(&timestamped_log_line(line));
+}
+
+fn timestamped_log_line(line: &str) -> String {
+    format!("[{}] {line}", chrono::Local::now().format("%H:%M:%S"))
+}
+
+fn format_elapsed(duration: Duration) -> String {
+    if duration.as_secs() >= 1 {
+        format!("{:.2}s", duration.as_secs_f64())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
 }
