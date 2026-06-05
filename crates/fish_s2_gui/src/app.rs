@@ -39,7 +39,11 @@ struct NativeRustEngineKey {
     transformer: PathBuf,
     codec: PathBuf,
     workdir: PathBuf,
+    backend: String,
     max_new_tokens: u32,
+    cuda_device: i32,
+    vulkan_device: i32,
+    codec_vulkan_device: i32,
 }
 
 struct NativeRustEngineCache {
@@ -297,29 +301,35 @@ impl FishS2App {
         engine_cfg.generate_params.max_new_tokens = self.config.server_max_new_tokens;
         engine_cfg.vulkan_device = self.config.vulkan_device;
         engine_cfg.codec_vulkan_device = self.config.codec_vulkan_device;
+        engine_cfg.cuda_device = self.config.cuda_device;
 
         if let (Some(wav), Some(text)) = (&ref_wav, &ref_text) {
             let _ = copy_reference_files(&engine_cfg.workdir, wav, text);
         }
 
         match InferenceEngine::load(engine_cfg) {
-            Ok(engine) => match fish_s2_infer::spawn_server(engine, self.config.server_port) {
-                Ok(handle) => {
-                    self.rust_server = Some(handle);
-                    self.server_log = format!(
-                        "Rust 推理引擎：http://127.0.0.1:{}\nTransformer: {}\nCodec: {}",
-                        self.config.server_port,
-                        pair.transformer.path.display(),
-                        pair.codec.path.display()
-                    );
-                    self.status_line =
-                        "Rust 伺服器已啟動（首次載入 GGUF 可能需要數秒）".to_string();
+            Ok(engine) => {
+                let backend = engine.backend();
+                match fish_s2_infer::spawn_server(engine, self.config.server_port) {
+                    Ok(handle) => {
+                        self.rust_server = Some(handle);
+                        self.server_log = format!(
+                            "Rust 推理引擎：http://127.0.0.1:{}\nBackend: {}\n{}\nTransformer: {}\nCodec: {}",
+                            self.config.server_port,
+                            backend.as_str(),
+                            backend_device_line(backend, self.config.cuda_device),
+                            pair.transformer.path.display(),
+                            pair.codec.path.display()
+                        );
+                        self.status_line =
+                            "Rust 伺服器已啟動（首次載入 GGUF 可能需要數秒）".to_string();
+                    }
+                    Err(e) => {
+                        self.status_line = e.to_string();
+                        self.server_log = self.status_line.clone();
+                    }
                 }
-                Err(e) => {
-                    self.status_line = e.to_string();
-                    self.server_log = self.status_line.clone();
-                }
-            },
+            }
             Err(e) => {
                 self.status_line = e.to_string();
                 self.server_log = self.status_line.clone();
@@ -379,13 +389,32 @@ impl FishS2App {
             &mut self.synthesis_log,
             &format!("max_new_tokens：{}", self.config.server_max_new_tokens),
         );
+        let backend = match EngineBackend::parse(&self.config.server_backend) {
+            Ok(backend) => backend,
+            Err(e) => {
+                self.status_line = e.to_string();
+                return;
+            }
+        };
+        append_log_line(
+            &mut self.synthesis_log,
+            &format!("Backend：{}", backend.as_str()),
+        );
+        append_log_line(
+            &mut self.synthesis_log,
+            &backend_device_line(backend, self.config.cuda_device),
+        );
         self.status_line = "正在準備原生 Rust 引擎…".to_string();
         let output_dir = self.config.output_dir.clone();
         let key = NativeRustEngineKey {
             transformer: pair.transformer.path.clone(),
             codec: pair.codec.path.clone(),
             workdir: self.config.server_workdir.clone(),
+            backend: backend.as_str().to_string(),
             max_new_tokens: self.config.server_max_new_tokens,
+            cuda_device: self.config.cuda_device,
+            vulkan_device: self.config.vulkan_device,
+            codec_vulkan_device: self.config.codec_vulkan_device,
         };
         let engine_slot = self.native_engine_slot(key.clone());
         let tx = self.bg_tx.clone();
@@ -406,10 +435,21 @@ impl FishS2App {
                     let load_start = Instant::now();
                     let mut engine_cfg =
                         EngineConfig::new(pair.transformer.path.clone(), pair.codec.path.clone())?;
-                    engine_cfg.backend = EngineBackend::RustPure;
+                    engine_cfg.backend = backend;
                     engine_cfg.workdir = key.workdir.clone();
                     engine_cfg.generate_params.max_new_tokens = key.max_new_tokens;
+                    engine_cfg.cuda_device = key.cuda_device;
+                    engine_cfg.vulkan_device = key.vulkan_device;
+                    engine_cfg.codec_vulkan_device = key.codec_vulkan_device;
                     send_debug(&tx, &format!("工作目錄：{}", engine_cfg.workdir.display()));
+                    send_debug(
+                        &tx,
+                        &format!(
+                            "後端：{}；{}",
+                            engine_cfg.backend.as_str(),
+                            backend_device_line(engine_cfg.backend, engine_cfg.cuda_device)
+                        ),
+                    );
                     send_debug(
                         &tx,
                         &format!("tokenizer：{}", engine_cfg.tokenizer_path.display()),
@@ -1038,27 +1078,53 @@ impl FishS2App {
             egui::ComboBox::from_id_salt("server_backend")
                 .selected_text(&self.config.server_backend)
                 .show_ui(ui, |ui| {
+                    let backend_before = self.config.server_backend.clone();
                     ui.selectable_value(
                         &mut self.config.server_backend,
                         "rust-pure".to_string(),
                         "rust-pure",
                     );
                     ui.selectable_value(&mut self.config.server_backend, "ffi".to_string(), "ffi");
+                    ui.selectable_value(
+                        &mut self.config.server_backend,
+                        "ffi-cuda".to_string(),
+                        "ffi-cuda",
+                    );
                     #[cfg(feature = "legacy-s2-exe")]
                     ui.selectable_value(
                         &mut self.config.server_backend,
                         "subprocess".to_string(),
                         "subprocess",
                     );
+                    if self.config.server_backend != backend_before {
+                        self.native_rust_engine = None;
+                    }
                 });
             ui.label("生成幀數");
             ui.add(egui::DragValue::new(&mut self.config.server_max_new_tokens).range(1..=2048));
         });
         ui.horizontal(|ui| {
+            ui.label("CUDA 裝置");
+            if ui
+                .add(egui::DragValue::new(&mut self.config.cuda_device).range(0..=16))
+                .changed()
+            {
+                self.native_rust_engine = None;
+            }
             ui.label("Vulkan 裝置");
-            ui.add(egui::DragValue::new(&mut self.config.vulkan_device));
+            if ui
+                .add(egui::DragValue::new(&mut self.config.vulkan_device))
+                .changed()
+            {
+                self.native_rust_engine = None;
+            }
             ui.label("Codec Vulkan");
-            ui.add(egui::DragValue::new(&mut self.config.codec_vulkan_device).range(-1..=8));
+            if ui
+                .add(egui::DragValue::new(&mut self.config.codec_vulkan_device).range(-1..=8))
+                .changed()
+            {
+                self.native_rust_engine = None;
+            }
         });
 
         ui.horizontal(|ui| {
@@ -1160,6 +1226,14 @@ fn format_elapsed(duration: Duration) -> String {
         format!("{:.2}s", duration.as_secs_f64())
     } else {
         format!("{}ms", duration.as_millis())
+    }
+}
+
+fn backend_device_line(backend: EngineBackend, cuda_device: i32) -> String {
+    if backend.uses_cuda() {
+        format!("CUDA：device {cuda_device}")
+    } else {
+        "CUDA：未使用".to_string()
     }
 }
 

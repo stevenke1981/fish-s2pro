@@ -13,6 +13,7 @@ use crate::prompt::PromptCodes;
 pub enum EngineBackend {
     RustPure,
     Ffi,
+    FfiCuda,
     #[cfg(feature = "legacy-s2-exe")]
     Subprocess,
 }
@@ -22,6 +23,7 @@ impl EngineBackend {
         match value.to_ascii_lowercase().as_str() {
             "rust" | "rust-pure" | "pure-rust" => Ok(Self::RustPure),
             "ffi" | "cpp" | "native" => Ok(Self::Ffi),
+            "cuda" | "ffi-cuda" | "cpp-cuda" | "native-cuda" => Ok(Self::FfiCuda),
             #[cfg(feature = "legacy-s2-exe")]
             "subprocess" | "s2" | "s2.exe" => Ok(Self::Subprocess),
             other => Err(InferError::Message(format!(
@@ -35,30 +37,39 @@ impl EngineBackend {
         match self {
             Self::RustPure => "rust-pure",
             Self::Ffi => "ffi",
+            Self::FfiCuda => "ffi-cuda",
             #[cfg(feature = "legacy-s2-exe")]
             Self::Subprocess => "subprocess",
         }
     }
 
+    pub fn is_ffi(self) -> bool {
+        matches!(self, Self::Ffi | Self::FfiCuda)
+    }
+
+    pub fn uses_cuda(self) -> bool {
+        matches!(self, Self::FfiCuda)
+    }
+
     pub fn expected_values() -> &'static str {
         #[cfg(feature = "legacy-s2-exe")]
         {
-            "rust-pure, ffi, or subprocess"
+            "rust-pure, ffi, ffi-cuda, or subprocess"
         }
         #[cfg(not(feature = "legacy-s2-exe"))]
         {
-            "rust-pure or ffi"
+            "rust-pure, ffi, or ffi-cuda"
         }
     }
 
     pub fn cli_values() -> &'static str {
         #[cfg(feature = "legacy-s2-exe")]
         {
-            "rust-pure|ffi|subprocess"
+            "rust-pure|ffi|ffi-cuda|subprocess"
         }
         #[cfg(not(feature = "legacy-s2-exe"))]
         {
-            "rust-pure|ffi"
+            "rust-pure|ffi|ffi-cuda"
         }
     }
 }
@@ -74,6 +85,7 @@ pub struct EngineConfig {
     pub seed: u64,
     pub vulkan_device: i32,
     pub codec_vulkan_device: i32,
+    pub cuda_device: i32,
 }
 
 impl EngineConfig {
@@ -101,6 +113,7 @@ impl EngineConfig {
             seed: 0,
             vulkan_device: 0,
             codec_vulkan_device: 0,
+            cuda_device: 0,
         })
     }
 }
@@ -149,12 +162,12 @@ impl InferenceEngine {
         };
 
         #[cfg(not(s2_cpp_linked))]
-        if config.backend == EngineBackend::Ffi {
+        if config.backend.is_ffi() {
             return Err(InferError::NativeNotLinked);
         }
 
         #[cfg(s2_cpp_linked)]
-        let native = if config.backend == EngineBackend::Ffi {
+        let native = if config.backend.is_ffi() {
             Some(Mutex::new(native::NativeEngine::load(&config)?))
         } else {
             None
@@ -191,7 +204,7 @@ impl InferenceEngine {
 
         match self.config.backend {
             EngineBackend::RustPure => self.synthesize_via_rust_pipeline(request),
-            EngineBackend::Ffi => {
+            EngineBackend::Ffi | EngineBackend::FfiCuda => {
                 #[cfg(s2_cpp_linked)]
                 {
                     let native = self
@@ -368,6 +381,8 @@ mod native {
         workdir: *const c_char,
         vulkan_device: i32,
         codec_vulkan_device: i32,
+        use_cuda: i32,
+        cuda_device: i32,
     }
 
     unsafe extern "C" {
@@ -407,6 +422,8 @@ mod native {
                 workdir: workdir.as_ptr(),
                 vulkan_device: config.vulkan_device,
                 codec_vulkan_device: config.codec_vulkan_device,
+                use_cuda: i32::from(config.backend.uses_cuda()),
+                cuda_device: config.cuda_device,
             };
             let handle = unsafe { s2_engine_create(&cfg, err_buf.as_mut_ptr(), err_buf.len()) };
             if handle.is_null() {
@@ -477,6 +494,14 @@ mod tests {
             EngineBackend::RustPure
         );
         assert_eq!(EngineBackend::parse("ffi").unwrap(), EngineBackend::Ffi);
+        assert_eq!(
+            EngineBackend::parse("ffi-cuda").unwrap(),
+            EngineBackend::FfiCuda
+        );
+        assert_eq!(
+            EngineBackend::parse("cuda").unwrap(),
+            EngineBackend::FfiCuda
+        );
         #[cfg(feature = "legacy-s2-exe")]
         assert_eq!(
             EngineBackend::parse("subprocess").unwrap(),

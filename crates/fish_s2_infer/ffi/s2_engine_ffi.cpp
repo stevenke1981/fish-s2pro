@@ -1,8 +1,9 @@
 #include "s2_engine_ffi.h"
 
-#include "../include/s2_pipeline.h"
+#include "s2_pipeline.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -20,17 +21,30 @@ static void copy_err(char *err, size_t err_cap, const std::string &msg) {
     err[err_cap - 1] = '\0';
 }
 
+static void set_cuda_device_env(int32_t device) {
+    const std::string value = std::to_string(device);
+#ifdef _WIN32
+    _putenv_s("FISH_S2_CUDA_DEVICE", value.c_str());
+#else
+    setenv("FISH_S2_CUDA_DEVICE", value.c_str(), 1);
+#endif
+}
+
 extern "C" S2EngineHandle *s2_engine_create(const S2EngineConfig *cfg, char *err, size_t err_cap) {
     if (!cfg || !cfg->model_path || !cfg->tokenizer_path) {
         copy_err(err, err_cap, "invalid engine config");
         return nullptr;
     }
     auto *handle = new S2EngineHandle();
+    const bool use_cuda = cfg->use_cuda != 0;
+    if (use_cuda) {
+        set_cuda_device_env(cfg->cuda_device);
+    }
     handle->base.model_path = cfg->model_path;
     handle->base.codec_model_path = cfg->codec_path ? cfg->codec_path : "";
     handle->base.tokenizer_path = cfg->tokenizer_path;
-    handle->base.vulkan_device = cfg->vulkan_device;
-    handle->base.codec_vulkan_device = cfg->codec_vulkan_device;
+    handle->base.vulkan_device = use_cuda ? -1 : cfg->vulkan_device;
+    handle->base.codec_vulkan_device = use_cuda ? -1 : cfg->codec_vulkan_device;
     handle->base.gen.max_new_tokens = 2048;
     handle->base.gen.temperature = 0.7f;
     handle->base.gen.top_p = 0.8f;

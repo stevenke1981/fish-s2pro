@@ -16,6 +16,8 @@ typedef struct S2EngineConfig {
     const char *workdir;
     int32_t vulkan_device;
     int32_t codec_vulkan_device;
+    int32_t use_cuda;
+    int32_t cuda_device;
 } S2EngineConfig;
 
 S2EngineHandle *s2_engine_create(const S2EngineConfig *cfg, char *err, size_t err_cap);

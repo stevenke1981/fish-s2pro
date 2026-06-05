@@ -2,7 +2,8 @@ param(
     [string] $DistDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "dist\fish-s2pro-mvp"),
     [switch] $SkipBuild,
     [switch] $RunVerify,
-    [switch] $Archive
+    [switch] $Archive,
+    [string] $Features = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +50,33 @@ function Copy-RequiredFile {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
+}
+
+function Copy-OptionalGgmlRuntimeDlls {
+    param([string] $DestinationDir)
+
+    $candidates = @()
+    if ($env:S2_CPP_DLL_DIR) {
+        $candidates += $env:S2_CPP_DLL_DIR
+    }
+    if ($env:S2_CPP_LIB) {
+        $libDir = [System.IO.Path]::GetFullPath($env:S2_CPP_LIB)
+        $nativeRoot = Split-Path -Parent $libDir
+        $candidates += Join-Path $nativeRoot "ggml\bin\Release"
+        $candidates += Join-Path $nativeRoot "ggml\bin"
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        $dlls = @(Get-ChildItem -LiteralPath $candidate -Filter "ggml*.dll" -File -ErrorAction SilentlyContinue)
+        if ($dlls.Count -eq 0) { continue }
+        foreach ($dll in $dlls) {
+            Copy-RequiredFile $dll.FullName (Join-Path $DestinationDir $dll.Name)
+        }
+        Write-Host "copied_ggml_runtime_dlls=$($dlls.Count)"
+        Write-Host "ggml_runtime_dir=$candidate"
+        return
+    }
 }
 
 function Get-GitValue {
@@ -102,10 +130,18 @@ if ($RunVerify) {
 
 if (-not $SkipBuild) {
     Invoke-Checked -Label "building release GUI" -Command {
-        cargo build --release -p fish_s2_gui
+        if ($Features.Trim()) {
+            cargo build --release -p fish_s2_gui --features $Features
+        } else {
+            cargo build --release -p fish_s2_gui
+        }
     }
     Invoke-Checked -Label "building release server" -Command {
-        cargo build --release -p fish_s2_infer --bin fish_s2_server
+        if ($Features.Trim()) {
+            cargo build --release -p fish_s2_infer --bin fish_s2_server --features $Features
+        } else {
+            cargo build --release -p fish_s2_infer --bin fish_s2_server
+        }
     }
 }
 
@@ -123,6 +159,7 @@ New-Item -ItemType Directory -Force -Path $binDir, $scriptsDir, $docsDir, $model
 $releaseDir = Join-Path $root "target\release"
 Copy-RequiredFile (Join-Path $releaseDir "fish-s2pro$exeSuffix") (Join-Path $binDir "fish-s2pro$exeSuffix")
 Copy-RequiredFile (Join-Path $releaseDir "fish_s2_server$exeSuffix") (Join-Path $binDir "fish_s2_server$exeSuffix")
+Copy-OptionalGgmlRuntimeDlls $binDir
 
 Copy-RequiredFile (Join-Path $root "README.md") (Join-Path $distDirFull "README.md")
 Copy-RequiredFile (Join-Path $root "README.zh-TW.md") (Join-Path $distDirFull "README.zh-TW.md")
@@ -138,7 +175,8 @@ param(
     [string] $Codec = (Join-Path (Split-Path $PSScriptRoot -Parent) "models\s2-pro-f16-codec-only.gguf"),
     [int] $Port = 8081,
     [int] $MaxNewTokens = 1,
-    [string] $Backend = "rust-pure"
+    [string] $Backend = "rust-pure",
+    [int] $CudaDevice = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -154,6 +192,7 @@ if (-not (Test-Path -LiteralPath $Codec)) { throw "codec GGUF not found: $Codec"
     --transformer $Transformer `
     --codec $Codec `
     --backend $Backend `
+    --cuda-device $CudaDevice `
     --max-new-tokens $MaxNewTokens `
     --port $Port
 '@
@@ -383,12 +422,13 @@ Write-Utf8NoBom (Join-Path $scriptsDir "verify_package.ps1") ($verifyPackageScri
 $packageReadme = @"
 # Fish S2 Pro Rust MVP Package
 
-This package contains the RustPure MVP binaries and support scripts.
+This package contains the RustPure MVP binaries and optional cpp-engine/ffi-cuda runtime files when built with -Features cpp-engine.
 
 ## Layout
 
 - bin/fish-s2pro${exeSuffix}: Windows desktop GUI.
-- bin/fish_s2_server${exeSuffix}: RustPure HTTP server for /v1/tts.
+- bin/fish_s2_server${exeSuffix}: HTTP server for /v1/tts; supports rust-pure and, when linked, ffi/ffi-cuda.
+- bin/ggml*.dll: optional GGML runtime DLLs copied from S2_CPP_LIB for cpp-engine/CUDA packages.
 - models/: put tokenizer.json and the transformer-only + codec-only GGUF pair here.
 - scripts/: model download, packaged server launch, and smoke helpers.
 - scripts/check_cuda_compat.ps1: CUDA/NVIDIA toolkit compatibility report.
@@ -400,10 +440,11 @@ This package contains the RustPure MVP binaries and support scripts.
 1. Download model assets with scripts/download_models.ps1 or copy them into models/.
 2. Run bin/fish-s2pro$exeSuffix for the GUI.
 3. Or run scripts/run_server.ps1 -MaxNewTokens 1 -Port 8081.
-4. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
-5. Validate the package files with scripts/verify_package.ps1.
-6. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.
-7. Check CUDA compatibility with scripts/check_cuda_compat.ps1.
+4. For CUDA FFI builds, run scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0.
+5. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
+6. Validate the package files with scripts/verify_package.ps1.
+7. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.
+8. Check CUDA compatibility with scripts/check_cuda_compat.ps1.
 
 The package intentionally does not include model weights or tokenizer assets.
 "@

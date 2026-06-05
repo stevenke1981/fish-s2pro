@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut transformer = None;
     let mut codec = None;
     let mut backend = None;
+    let mut cuda_device = None;
     let mut max_new_tokens = None;
     let mut port: u16 = 8081;
     let mut i = 1;
@@ -58,6 +59,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|_| "invalid --max-new-tokens")?,
                 );
             }
+            "--cuda-device" => {
+                i += 1;
+                cuda_device = Some(
+                    args.get(i)
+                        .ok_or("missing --cuda-device")?
+                        .parse()
+                        .map_err(|_| "invalid --cuda-device")?,
+                );
+            }
             "--print-paths" => {
                 print_paths();
                 return Ok(());
@@ -87,6 +97,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(max_new_tokens) = max_new_tokens {
         cfg.generate_params.max_new_tokens = max_new_tokens;
     }
+    if let Some(cuda_device) = cuda_device {
+        cfg.cuda_device = cuda_device;
+    }
     if !default_tokenizer_path().exists() {
         eprintln!(
             "warning: tokenizer missing at {} — run scripts/download_models.ps1",
@@ -95,8 +108,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!(
-        "loading models (may take a while)...\n  backend: {}\n  transformer: {}\n  codec: {}",
+        "loading models (may take a while)...\n  backend: {}\n  cuda_device: {}\n  transformer: {}\n  codec: {}",
         cfg.backend.as_str(),
+        if cfg.backend.uses_cuda() {
+            cfg.cuda_device.to_string()
+        } else {
+            "unused".to_string()
+        },
         cfg.transformer_gguf.display(),
         cfg.codec_gguf.display()
     );
@@ -156,7 +174,7 @@ fn print_help() {
         r#"fish_s2_server — in-process S2 Pro inference (Rust)
 
 Usage:
-  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend {}] [--max-new-tokens N] [--print-paths]
+  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend {}] [--cuda-device N] [--max-new-tokens N] [--print-paths]
 
 If paths are omitted, picks the first transformer-only + codec-only pair in models/.
 "#,

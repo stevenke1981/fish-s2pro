@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub server_max_new_tokens: u32,
     pub vulkan_device: i32,
     pub codec_vulkan_device: i32,
+    #[serde(default)]
+    pub cuda_device: i32,
     pub use_rust_engine: bool,
     pub active_model_pair_id: Option<String>,
     pub voices: Vec<VoiceProfile>,
@@ -41,6 +43,7 @@ impl Default for AppConfig {
             server_max_new_tokens: default_server_max_new_tokens(),
             vulkan_device: 0,
             codec_vulkan_device: 0,
+            cuda_device: 0,
             use_rust_engine: true,
             active_model_pair_id: None,
             voices: Vec::new(),

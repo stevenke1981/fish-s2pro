@@ -15,7 +15,11 @@ fn main() {
 
     if let Some(lib) = lib_dir {
         let lib_str = lib.display().to_string();
-        if lib.join("fish_s2_cpp.lib").exists() || lib.join("libfish_s2_cpp.a").exists() {
+        let msvc_lib = lib.join("fish_s2_cpp.lib");
+        let unix_lib = lib.join("libfish_s2_cpp.a");
+        println!("cargo:rerun-if-changed={}", msvc_lib.display());
+        println!("cargo:rerun-if-changed={}", unix_lib.display());
+        if msvc_lib.exists() || unix_lib.exists() {
             println!("cargo:rustc-cfg=s2_cpp_linked");
             println!("cargo:rustc-link-lib=static=fish_s2_cpp");
             println!("cargo:rustc-link-search=native={lib_str}");
