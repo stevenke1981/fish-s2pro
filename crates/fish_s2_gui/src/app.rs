@@ -1258,7 +1258,9 @@ fn format_elapsed(duration: Duration) -> String {
 
 fn backend_device_line(backend: EngineBackend, cuda_device: i32) -> String {
     if backend.uses_cuda() {
-        format!("CUDA：device {cuda_device}（GGML CUDA active；Vulkan device -1 為預期）")
+        format!(
+            "CUDA：device {cuda_device}（Transformer 使用 GGML CUDA；codec 預設 CPU fallback，避開 CUDA IM2COL）"
+        )
     } else {
         "CUDA：未使用".to_string()
     }

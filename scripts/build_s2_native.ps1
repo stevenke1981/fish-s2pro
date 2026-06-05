@@ -45,12 +45,12 @@ function Patch-S2CppCudaHooks {
                 1
             )
         }
-        if (-not $raw.Contains("FISH_S2_CUDA_DEVICE")) {
+        if (-not $raw.Contains("[Codec] CUDA backend initialized")) {
             Write-Host "Patching s2_codec.cpp CUDA backend hook..."
             $cudaHook = @'
 #ifdef GGML_USE_CUDA
     if (!impl_->backend) {
-        if (const char * cuda_device_env = std::getenv("FISH_S2_CUDA_DEVICE")) {
+        if (const char * cuda_device_env = std::getenv("FISH_S2_CODEC_CUDA_DEVICE")) {
             const int cuda_device = std::atoi(cuda_device_env);
             impl_->backend = ggml_backend_cuda_init(cuda_device);
             if (impl_->backend) {
@@ -66,6 +66,30 @@ function Patch-S2CppCudaHooks {
                 "    if (!impl_->backend) impl_->backend = ggml_backend_cpu_init();",
                 $cudaHook + "    if (!impl_->backend) impl_->backend = ggml_backend_cpu_init();"
             )
+        }
+        $oldCodecCudaEnv = 'if (const char * cuda_device_env = std::getenv("FISH_S2_CUDA_DEVICE"))'
+        if ($raw.Contains($oldCodecCudaEnv)) {
+            Write-Host "Patching s2_codec.cpp codec CUDA opt-in env..."
+            $raw = $raw.Replace(
+                $oldCodecCudaEnv,
+                'if (const char * cuda_device_env = std::getenv("FISH_S2_CODEC_CUDA_DEVICE"))'
+            )
+        }
+        $raw = $raw.Replace("#endif    if", "#endif`n    if")
+        $cpuInitLine = "    if (!impl_->backend) impl_->backend = ggml_backend_cpu_init();"
+        if ($raw.Contains($cpuInitLine)) {
+            Write-Host "Patching s2_codec.cpp CPU codec fallback log..."
+            $cpuInitBlock = @'
+    if (!impl_->backend) {
+#ifdef GGML_USE_CUDA
+        if (std::getenv("FISH_S2_CUDA_DEVICE") && !std::getenv("FISH_S2_CODEC_CUDA_DEVICE")) {
+            std::cout << "[Codec] CUDA backend disabled by default for codec decode; using CPU codec backend." << std::endl;
+        }
+#endif
+        impl_->backend = ggml_backend_cpu_init();
+    }
+'@
+            $raw = $raw.Replace($cpuInitLine, $cpuInitBlock)
         }
         if (-not $raw.Contains("#include <cstdlib>")) {
             $raw = $raw.Replace("#include <stdexcept>", "#include <stdexcept>`n#include <cstdlib>")
