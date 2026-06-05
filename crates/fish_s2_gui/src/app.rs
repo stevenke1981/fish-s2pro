@@ -362,11 +362,14 @@ impl FishS2App {
             self.status_line = e.to_string();
             return;
         }
-        let text = self.script.trim().to_string();
-        if text.is_empty() {
+        let raw_text = self.script.trim();
+        let sanitized_text = sanitize_tts_script(raw_text);
+        if sanitized_text.is_empty() {
             self.status_line = "請輸入要合成的文字".to_string();
             return;
         }
+        let style_prefix = tts_style_prefix(&self.config);
+        let text = apply_tts_style(&sanitized_text, &style_prefix);
 
         let voice = self.config.active_voice().cloned();
         self.busy = true;
@@ -389,6 +392,18 @@ impl FishS2App {
                 text.chars().count()
             ),
         );
+        if sanitized_text != raw_text {
+            append_log_line(
+                &mut self.synthesis_log,
+                "文字清理：已移除 system/user/assistant 或 ChatML 標記，避免被念出來。",
+            );
+        }
+        if !style_prefix.is_empty() {
+            append_log_line(
+                &mut self.synthesis_log,
+                &format!("朗讀控制：{style_prefix}"),
+            );
+        }
         append_log_line(
             &mut self.synthesis_log,
             &format!("文字預覽：{}", text_preview(&text)),
@@ -544,11 +559,14 @@ impl FishS2App {
             self.status_line = "請先啟動 Rust 推理伺服器".to_string();
             return;
         }
-        let text = self.script.trim().to_string();
-        if text.is_empty() {
+        let raw_text = self.script.trim();
+        let sanitized_text = sanitize_tts_script(raw_text);
+        if sanitized_text.is_empty() {
             self.status_line = "請輸入要合成的文字".to_string();
             return;
         }
+        let style_prefix = tts_style_prefix(&self.config);
+        let text = apply_tts_style(&sanitized_text, &style_prefix);
         self.busy = true;
         self.synthesis_log.clear();
         append_log_line(&mut self.synthesis_log, "開始：HTTP server /v1/tts 生成");
@@ -567,6 +585,18 @@ impl FishS2App {
                 text.chars().count()
             ),
         );
+        if sanitized_text != raw_text {
+            append_log_line(
+                &mut self.synthesis_log,
+                "文字清理：已移除 system/user/assistant 或 ChatML 標記，避免被念出來。",
+            );
+        }
+        if !style_prefix.is_empty() {
+            append_log_line(
+                &mut self.synthesis_log,
+                &format!("朗讀控制：{style_prefix}"),
+            );
+        }
         self.status_line = "正在合成語音…".to_string();
         let port = self.config.server_port;
         let output_dir = self.config.output_dir.clone();
@@ -701,6 +731,47 @@ impl FishS2App {
             if ui.button("儲存設定").clicked() {
                 self.persist();
                 self.status_line = "設定已儲存".to_string();
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let mut changed = false;
+            changed |= preset_combo(
+                ui,
+                "tts_role",
+                "角色",
+                &mut self.config.tts_role,
+                TTS_ROLE_OPTIONS,
+            );
+            changed |= preset_combo(
+                ui,
+                "tts_tone",
+                "語調",
+                &mut self.config.tts_tone,
+                TTS_TONE_OPTIONS,
+            );
+            changed |= preset_combo(
+                ui,
+                "tts_pace",
+                "速度",
+                &mut self.config.tts_pace,
+                TTS_PACE_OPTIONS,
+            );
+            changed |= preset_combo(
+                ui,
+                "tts_pitch",
+                "音高",
+                &mut self.config.tts_pitch,
+                TTS_PITCH_OPTIONS,
+            );
+            changed |= preset_combo(
+                ui,
+                "tts_energy",
+                "能量",
+                &mut self.config.tts_energy,
+                TTS_ENERGY_OPTIONS,
+            );
+            if changed {
+                self.persist();
             }
         });
         if self.config.server_max_new_tokens <= 1 {
@@ -1256,6 +1327,261 @@ fn format_elapsed(duration: Duration) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TtsPreset {
+    id: &'static str,
+    label: &'static str,
+    tag: &'static str,
+}
+
+const TTS_ROLE_OPTIONS: &[TtsPreset] = &[
+    TtsPreset {
+        id: "default",
+        label: "預設",
+        tag: "",
+    },
+    TtsPreset {
+        id: "female",
+        label: "女聲",
+        tag: "[female voice]",
+    },
+    TtsPreset {
+        id: "male",
+        label: "男聲",
+        tag: "[male voice]",
+    },
+    TtsPreset {
+        id: "narrator",
+        label: "旁白",
+        tag: "[narrator]",
+    },
+    TtsPreset {
+        id: "young",
+        label: "年輕",
+        tag: "[young voice]",
+    },
+    TtsPreset {
+        id: "mature",
+        label: "成熟",
+        tag: "[mature voice]",
+    },
+];
+
+const TTS_TONE_OPTIONS: &[TtsPreset] = &[
+    TtsPreset {
+        id: "natural",
+        label: "自然",
+        tag: "",
+    },
+    TtsPreset {
+        id: "warm",
+        label: "溫柔",
+        tag: "[warm]",
+    },
+    TtsPreset {
+        id: "calm",
+        label: "平靜",
+        tag: "[calm]",
+    },
+    TtsPreset {
+        id: "excited",
+        label: "興奮",
+        tag: "[excited]",
+    },
+    TtsPreset {
+        id: "serious",
+        label: "嚴肅",
+        tag: "[serious]",
+    },
+    TtsPreset {
+        id: "whisper",
+        label: "耳語",
+        tag: "[whisper]",
+    },
+];
+
+const TTS_PACE_OPTIONS: &[TtsPreset] = &[
+    TtsPreset {
+        id: "normal",
+        label: "正常",
+        tag: "",
+    },
+    TtsPreset {
+        id: "slow",
+        label: "慢",
+        tag: "[slow]",
+    },
+    TtsPreset {
+        id: "fast",
+        label: "快",
+        tag: "[fast]",
+    },
+];
+
+const TTS_PITCH_OPTIONS: &[TtsPreset] = &[
+    TtsPreset {
+        id: "normal",
+        label: "正常",
+        tag: "",
+    },
+    TtsPreset {
+        id: "low",
+        label: "低",
+        tag: "[low voice]",
+    },
+    TtsPreset {
+        id: "high",
+        label: "高",
+        tag: "[high pitch]",
+    },
+];
+
+const TTS_ENERGY_OPTIONS: &[TtsPreset] = &[
+    TtsPreset {
+        id: "normal",
+        label: "正常",
+        tag: "",
+    },
+    TtsPreset {
+        id: "soft",
+        label: "柔和",
+        tag: "[volume down]",
+    },
+    TtsPreset {
+        id: "strong",
+        label: "有力",
+        tag: "[volume up] [emphasis]",
+    },
+];
+
+fn preset_combo(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    label: &str,
+    selected: &mut String,
+    options: &[TtsPreset],
+) -> bool {
+    let before = selected.clone();
+    ui.label(label);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(selected_preset_label(selected, options))
+        .show_ui(ui, |ui| {
+            for option in options {
+                ui.selectable_value(selected, option.id.to_string(), option.label);
+            }
+        });
+    *selected != before
+}
+
+fn selected_preset_label(selected: &str, options: &[TtsPreset]) -> &'static str {
+    options
+        .iter()
+        .find(|option| option.id == selected)
+        .map_or(options[0].label, |option| option.label)
+}
+
+fn tts_style_prefix(config: &AppConfig) -> String {
+    [
+        preset_tag(&config.tts_role, TTS_ROLE_OPTIONS),
+        preset_tag(&config.tts_tone, TTS_TONE_OPTIONS),
+        preset_tag(&config.tts_pace, TTS_PACE_OPTIONS),
+        preset_tag(&config.tts_pitch, TTS_PITCH_OPTIONS),
+        preset_tag(&config.tts_energy, TTS_ENERGY_OPTIONS),
+    ]
+    .into_iter()
+    .filter(|tag| !tag.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn preset_tag(selected: &str, options: &[TtsPreset]) -> &'static str {
+    options
+        .iter()
+        .find(|option| option.id == selected)
+        .map_or("", |option| option.tag)
+}
+
+fn sanitize_tts_script(text: &str) -> String {
+    let without_specials = text
+        .replace("<|im_start|>system", " ")
+        .replace("<|im_start|>user", " ")
+        .replace("<|im_start|>assistant", " ")
+        .replace("<|im_start|>", " ")
+        .replace("<|im_end|>", " ")
+        .replace("<|voice|>", " ");
+    let mut out = Vec::new();
+    for line in without_specials.lines() {
+        let trimmed = line.trim();
+        if is_system_role_line(trimmed) {
+            continue;
+        }
+        let line = strip_chat_role_prefix(trimmed);
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if matches!(lower.as_str(), "system" | "user" | "assistant") {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    out.join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_chat_role_prefix(line: &str) -> &str {
+    let mut rest = line;
+    loop {
+        let trimmed = rest.trim_start();
+        let lower = trimmed.to_ascii_lowercase();
+        let Some(prefix_len) = chat_role_prefix_len(&lower) else {
+            return trimmed;
+        };
+        rest = &trimmed[prefix_len..];
+    }
+}
+
+fn chat_role_prefix_len(lower: &str) -> Option<usize> {
+    for prefix in [
+        "system:",
+        "system：",
+        "user:",
+        "user：",
+        "assistant:",
+        "assistant：",
+        "系統:",
+        "系統：",
+        "使用者:",
+        "使用者：",
+        "助理:",
+        "助理：",
+    ] {
+        if lower.starts_with(prefix) {
+            return Some(prefix.len());
+        }
+    }
+    None
+}
+
+fn is_system_role_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower == "system"
+        || lower.starts_with("system:")
+        || lower.starts_with("system：")
+        || line.starts_with("系統:")
+        || line.starts_with("系統：")
+}
+
+fn apply_tts_style(text: &str, style_prefix: &str) -> String {
+    if style_prefix.is_empty() {
+        text.to_string()
+    } else {
+        format!("{style_prefix} {text}")
+    }
+}
+
 fn backend_device_line(backend: EngineBackend, cuda_device: i32) -> String {
     if backend.uses_cuda() {
         format!(
@@ -1462,6 +1788,32 @@ mod tests {
         let (tokens, note) = effective_tts_max_new_tokens(4, "短測試", EngineBackend::RustPure);
         assert_eq!(tokens, 4);
         assert!(note.is_none());
+    }
+
+    #[test]
+    fn sanitizes_chat_template_text_before_tts() {
+        let cleaned = sanitize_tts_script(
+            "<|im_start|>system\nsystem: do not read this\nassistant: 你好，開始朗讀。\n<|im_end|>",
+        );
+        assert_eq!(cleaned, "你好，開始朗讀。");
+        assert!(!cleaned.to_ascii_lowercase().contains("system"));
+        assert!(!cleaned.to_ascii_lowercase().contains("assistant"));
+    }
+
+    #[test]
+    fn applies_selected_tts_style_tags() {
+        let config = AppConfig {
+            tts_role: "female".to_string(),
+            tts_tone: "calm".to_string(),
+            tts_pitch: "low".to_string(),
+            ..AppConfig::default()
+        };
+        let prefix = tts_style_prefix(&config);
+        assert_eq!(prefix, "[female voice] [calm] [low voice]");
+        assert_eq!(
+            apply_tts_style("你好", &prefix),
+            "[female voice] [calm] [low voice] 你好"
+        );
     }
 
     fn test_wav(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {

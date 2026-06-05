@@ -194,17 +194,6 @@ pub fn build_prompt(
 
     append_ids(
         &mut sys_post,
-        &tokenizer.encode_s2cpp("<|im_start|>system")?.ids,
-    );
-    append_ids(&mut sys_post, &newline);
-    append_ids(
-        &mut sys_post,
-        &tokenizer.encode_s2cpp("You are a helpful assistant.")?.ids,
-    );
-    append_u32(&mut sys_post, im_end_id);
-    append_ids(&mut sys_post, &newline);
-    append_ids(
-        &mut sys_post,
         &tokenizer.encode_s2cpp("<|im_start|>user")?.ids,
     );
     append_ids(&mut sys_post, &newline);

@@ -137,6 +137,22 @@ function Patch-S2CppCudaHooks {
             [System.IO.File]::WriteAllText($pipelineCpp, $raw, [System.Text.UTF8Encoding]::new($false))
         }
     }
+
+    $promptCpp = Join-Path $SourceRoot "src\s2_prompt.cpp"
+    if (Test-Path -LiteralPath $promptCpp) {
+        $raw = Get-Content -Raw -LiteralPath $promptCpp
+        $newNoRefSystem = @'
+        // sys_pre is empty, everything goes into sys_post. Keep no-reference TTS
+        // prompts free of system-role text, which can leak into generated audio.
+        app(sys_post, tokenizer.encode("<|im_start|>user"));
+'@
+        $oldNoRefSystemPattern = '(?s)\s*// sys_pre is empty, everything goes into sys_post\s*app\(sys_post, tokenizer\.encode\("<\|im_start\|>system"\)\);\s*app\(sys_post, NEWLINE\);\s*app\(sys_post, tokenizer\.encode\("You are a helpful assistant\."\)\);\s*app\(sys_post, \{ im_end_id \}\);\s*app\(sys_post, NEWLINE\);\s*app\(sys_post, tokenizer\.encode\("<\|im_start\|>user"\)\);'
+        if ([regex]::IsMatch($raw, $oldNoRefSystemPattern)) {
+            Write-Host "Patching s2_prompt.cpp no-reference TTS prompt..."
+            $raw = [regex]::Replace($raw, $oldNoRefSystemPattern, "`n" + $newNoRefSystem, 1)
+            [System.IO.File]::WriteAllText($promptCpp, $raw, [System.Text.UTF8Encoding]::new($false))
+        }
+    }
 }
 
 if ($UseCuda) {

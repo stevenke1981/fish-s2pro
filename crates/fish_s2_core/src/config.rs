@@ -26,6 +26,16 @@ pub struct AppConfig {
     pub voices: Vec<VoiceProfile>,
     pub active_voice_id: Option<uuid::Uuid>,
     pub last_script: String,
+    #[serde(default = "default_tts_role")]
+    pub tts_role: String,
+    #[serde(default = "default_tts_tone")]
+    pub tts_tone: String,
+    #[serde(default = "default_tts_pace")]
+    pub tts_pace: String,
+    #[serde(default = "default_tts_pitch")]
+    pub tts_pitch: String,
+    #[serde(default = "default_tts_energy")]
+    pub tts_energy: String,
     pub convert_checkpoint_dir: PathBuf,
     pub convert_script: PathBuf,
     pub python_exe: String,
@@ -49,6 +59,11 @@ impl Default for AppConfig {
             voices: Vec::new(),
             active_voice_id: None,
             last_script: "你好，這是使用 Fish Audio S2 Pro 生成的語音。".to_string(),
+            tts_role: default_tts_role(),
+            tts_tone: default_tts_tone(),
+            tts_pace: default_tts_pace(),
+            tts_pitch: default_tts_pitch(),
+            tts_energy: default_tts_energy(),
             convert_checkpoint_dir: PathBuf::new(),
             convert_script: PathBuf::new(),
             python_exe: "python".to_string(),
@@ -77,6 +92,26 @@ fn normalize_server_backend(value: &str) -> String {
 
 fn default_server_max_new_tokens() -> u32 {
     32
+}
+
+fn default_tts_role() -> String {
+    "default".to_string()
+}
+
+fn default_tts_tone() -> String {
+    "natural".to_string()
+}
+
+fn default_tts_pace() -> String {
+    "normal".to_string()
+}
+
+fn default_tts_pitch() -> String {
+    "normal".to_string()
+}
+
+fn default_tts_energy() -> String {
+    "normal".to_string()
 }
 
 impl AppConfig {
