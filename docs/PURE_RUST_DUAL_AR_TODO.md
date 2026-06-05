@@ -210,6 +210,10 @@
 
 ### Package G — GPU Acceleration
 
+- [x] CUDA compatibility preflight
+  - `scripts/check_cuda_compat.ps1` detects `nvidia-smi`, `nvcc`, CMake, selected GPU, compute capability, and recommended `CMAKE_CUDA_ARCHITECTURES`.
+  - `scripts/verify_mvp.ps1 -CheckCuda [-RequireCuda]` can include the preflight in MVP validation.
+  - `scripts/check_cuda_compat.ps1 -RunBuildSmoke` can run the existing s2.cpp CUDA Slow-AR dump build smoke from the source tree.
 - [ ] `fish_s2_infer::backend::MatmulBackend` trait
   - CPU reference backend first; GPU backend later.
   - Acceptance: Slow/Fast/codec ops call through backend abstraction where practical.
@@ -332,6 +336,7 @@
 
 *Depends on: Phase 7 CPU path*
 
+- [x] **8.0** CUDA compatibility/preflight gate. `scripts/check_cuda_compat.ps1` writes `output/cuda_compat_report.json`; `verify_mvp.ps1 -CheckCuda` includes it without requiring CUDA, and `-RequireCuda` turns it into a strict gate.
 - [ ] **8.1** Evaluate `ggml` Vulkan via Path B vs pure-Rust GPU crate.
 - [ ] **8.2** Match `-v` / `--codec-vulkan` device selection from `EngineConfig`.
 - [ ] **8.3** Windows CI note: s2.cpp alpha — document tested matrix (Linux + RTX only).
@@ -391,4 +396,4 @@ docs/PURE_RUST_DUAL_AR_TODO.md        # this file
 
 ---
 
-*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; legacy `s2.exe` subprocess fallback is now opt-in via `legacy-s2-exe`; `scripts/package_mvp.ps1` produces a self-verifying local MVP package under `dist/`; packaged exe path diagnostics are available through `fish_s2_server --print-paths`; next product work is optional slow `-RunServerSmoke`, broader release polish, and Phase 8 GPU acceleration.*
+*Last updated: 2026-06-05 — MVP: RustPure fast acceptance gate is scripted by `scripts/verify_mvp.ps1`; legacy `s2.exe` subprocess fallback is now opt-in via `legacy-s2-exe`; `scripts/package_mvp.ps1` produces a self-verifying local MVP package under `dist/`; packaged exe path diagnostics are available through `fish_s2_server --print-paths`; CUDA compatibility preflight is available through `scripts/check_cuda_compat.ps1`; next product work is optional slow `-RunServerSmoke`, broader release polish, and Phase 8 GPU acceleration.*

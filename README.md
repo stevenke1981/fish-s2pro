@@ -116,6 +116,29 @@ notes. The package includes `manifest.json`, `SHA256SUMS.txt`, and
 write `dist\fish-s2pro-mvp.zip`. Model weights and tokenizer assets are
 intentionally not bundled.
 
+## GPU / CUDA
+
+RustPure inference is CPU-first today. CUDA compatibility is currently used for
+the `s2.cpp` parity/build path and future GPU work. Generate a local CUDA report:
+
+```powershell
+.\scripts\check_cuda_compat.ps1
+```
+
+This writes `output\cuda_compat_report.json` with `nvidia-smi`, `nvcc`, CMake,
+GPU device, and recommended `CMAKE_CUDA_ARCHITECTURES` details. To fail when
+CUDA is not ready:
+
+```powershell
+.\scripts\verify_mvp.ps1 -CheckCuda -RequireCuda
+```
+
+For the source-tree s2.cpp CUDA build smoke, use:
+
+```powershell
+.\scripts\check_cuda_compat.ps1 -RunBuildSmoke -AllowUnsupportedCudaCompiler
+```
+
 ## Validation
 
 MVP acceptance gate:

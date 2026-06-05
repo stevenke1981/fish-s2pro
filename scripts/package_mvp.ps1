@@ -128,6 +128,7 @@ Copy-RequiredFile (Join-Path $root "README.md") (Join-Path $distDirFull "README.
 Copy-RequiredFile (Join-Path $root "README.zh-TW.md") (Join-Path $distDirFull "README.zh-TW.md")
 Copy-RequiredFile (Join-Path $root "docs\THIRD_PARTY_NOTICES.md") (Join-Path $docsDir "THIRD_PARTY_NOTICES.md")
 Copy-RequiredFile (Join-Path $root "models\README.txt") (Join-Path $modelsDir "README.txt")
+Copy-RequiredFile (Join-Path $root "scripts\check_cuda_compat.ps1") (Join-Path $scriptsDir "check_cuda_compat.ps1")
 Copy-RequiredFile (Join-Path $root "scripts\download_models.ps1") (Join-Path $scriptsDir "download_models.ps1")
 Copy-RequiredFile (Join-Path $root "scripts\Use-UnicodeEncoding.ps1") (Join-Path $scriptsDir "Use-UnicodeEncoding.ps1")
 
@@ -329,7 +330,7 @@ if ($forbidden) {
     throw "package unexpectedly includes model assets: $names"
 }
 
-foreach ($script in @("run_server.ps1", "smoke_server.ps1", "verify_package.ps1")) {
+foreach ($script in @("check_cuda_compat.ps1", "run_server.ps1", "smoke_server.ps1", "verify_package.ps1")) {
     $path = Join-Path $PSScriptRoot $script
     $tokens = $null
     $errors = $null
@@ -390,6 +391,7 @@ This package contains the RustPure MVP binaries and support scripts.
 - bin/fish_s2_server${exeSuffix}: RustPure HTTP server for /v1/tts.
 - models/: put tokenizer.json and the transformer-only + codec-only GGUF pair here.
 - scripts/: model download, packaged server launch, and smoke helpers.
+- scripts/check_cuda_compat.ps1: CUDA/NVIDIA toolkit compatibility report.
 - docs/THIRD_PARTY_NOTICES.md: upstream model/license notes.
 - manifest.json and SHA256SUMS.txt: package inventory and checksums.
 
@@ -401,6 +403,7 @@ This package contains the RustPure MVP binaries and support scripts.
 4. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
 5. Validate the package files with scripts/verify_package.ps1.
 6. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.
+7. Check CUDA compatibility with scripts/check_cuda_compat.ps1.
 
 The package intentionally does not include model weights or tokenizer assets.
 "@
@@ -421,6 +424,7 @@ $manifest = [ordered]@{
         "bin/fish_s2_server$exeSuffix"
     )
     scripts = @(
+        "scripts/check_cuda_compat.ps1",
         "scripts/download_models.ps1",
         "scripts/run_server.ps1",
         "scripts/smoke_server.ps1",

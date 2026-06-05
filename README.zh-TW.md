@@ -113,6 +113,29 @@ package-local 啟動與 smoke 腳本、模型下載 helper，以及授權/模型
 驗證。加上 `-Archive` 可另外輸出 `dist\fish-s2pro-mvp.zip`。模型權重與
 tokenizer 資產不會被打包進去。
 
+## GPU / CUDA
+
+目前 RustPure 推論仍以 CPU 為主；CUDA 相容性主要用於 `s2.cpp` parity/build
+路徑，以及後續 GPU 加速工作。產生本機 CUDA 報告：
+
+```powershell
+.\scripts\check_cuda_compat.ps1
+```
+
+這會寫出 `output\cuda_compat_report.json`，內容包含 `nvidia-smi`、`nvcc`、
+CMake、GPU device 與建議的 `CMAKE_CUDA_ARCHITECTURES`。若要 CUDA 未就緒時
+讓驗收失敗：
+
+```powershell
+.\scripts\verify_mvp.ps1 -CheckCuda -RequireCuda
+```
+
+source-tree 的 s2.cpp CUDA build smoke：
+
+```powershell
+.\scripts\check_cuda_compat.ps1 -RunBuildSmoke -AllowUnsupportedCudaCompiler
+```
+
 ## 驗證
 
 MVP 驗收 gate：

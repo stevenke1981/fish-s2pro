@@ -6,6 +6,8 @@ param(
     [int] $MaxNewTokens = 1,
     [int] $Port = 18081,
     [switch] $RunServerSmoke,
+    [switch] $CheckCuda,
+    [switch] $RequireCuda,
     [string] $OutputWav = (Join-Path (Split-Path $PSScriptRoot -Parent) "output\mvp_server_smoke.wav"),
     [string] $Report = (Join-Path (Split-Path $PSScriptRoot -Parent) "output\mvp_report.json")
 )
@@ -22,6 +24,10 @@ $serverSmoke = [ordered]@{
     status = $(if ($RunServerSmoke) { "pending" } else { "skipped" })
     output_wav = $OutputWav
     metrics = $null
+}
+$cudaCompat = [ordered]@{
+    status = $(if ($CheckCuda) { "pending" } else { "skipped" })
+    report = (Join-Path $outDir "cuda_compat_report.json")
 }
 
 function Test-RequiredFile {
@@ -79,6 +85,7 @@ function Save-MvpReport {
         }
         checks = @($checks)
         server_smoke = $serverSmoke
+        cuda_compat = $cudaCompat
     }
 
     $json = $reportObject | ConvertTo-Json -Depth 8
@@ -175,6 +182,23 @@ try {
         cargo run -q -p fish_s2_infer --bin fish_s2_server -- --help
     }
 
+    if ($CheckCuda) {
+        $cudaCompat.status = "running"
+        Invoke-MvpStep "CUDA compatibility check" {
+            $cudaArgs = @{
+                Report = $cudaCompat.report
+            }
+            if ($RequireCuda) {
+                $cudaArgs["RequireCuda"] = $true
+            }
+            & (Join-Path $PSScriptRoot "check_cuda_compat.ps1") @cudaArgs
+        }
+        $cudaCompat.status = "passed"
+        if (Test-Path -LiteralPath $cudaCompat.report) {
+            $cudaCompat.summary = Get-Content -Raw -LiteralPath $cudaCompat.report | ConvertFrom-Json
+        }
+    }
+
     if ($RunServerSmoke) {
         $serverSmoke.status = "running"
         Invoke-MvpStep "RustPure server smoke" {
@@ -206,6 +230,9 @@ try {
 } catch {
     if ($RunServerSmoke -and $serverSmoke.status -eq "running") {
         $serverSmoke.status = "failed"
+    }
+    if ($CheckCuda -and $cudaCompat.status -eq "running") {
+        $cudaCompat.status = "failed"
     }
     Save-MvpReport "failed"
     Write-Error $_
