@@ -56,6 +56,7 @@ function Copy-OptionalGgmlRuntimeDlls {
     param([string] $DestinationDir)
 
     $candidates = @()
+    $candidates += Join-Path $root "target\release"
     if ($env:S2_CPP_DLL_DIR) {
         $candidates += $env:S2_CPP_DLL_DIR
     }
@@ -176,7 +177,8 @@ param(
     [int] $Port = 8081,
     [int] $MaxNewTokens = 1,
     [string] $Backend = "rust-pure",
-    [int] $CudaDevice = 0
+    [int] $CudaDevice = 0,
+    [switch] $CodecCuda
 )
 
 $ErrorActionPreference = "Stop"
@@ -188,13 +190,19 @@ if (-not (Test-Path -LiteralPath $server)) { throw "server binary not found: $se
 if (-not (Test-Path -LiteralPath $Transformer)) { throw "transformer GGUF not found: $Transformer" }
 if (-not (Test-Path -LiteralPath $Codec)) { throw "codec GGUF not found: $Codec" }
 
-& $server `
-    --transformer $Transformer `
-    --codec $Codec `
-    --backend $Backend `
-    --cuda-device $CudaDevice `
-    --max-new-tokens $MaxNewTokens `
-    --port $Port
+$args = @(
+    "--transformer", $Transformer,
+    "--codec", $Codec,
+    "--backend", $Backend,
+    "--cuda-device", $CudaDevice.ToString(),
+    "--max-new-tokens", $MaxNewTokens.ToString(),
+    "--port", $Port.ToString()
+)
+if ($CodecCuda) {
+    $args += "--codec-cuda"
+}
+
+& $server @args
 '@
 Write-Utf8NoBom (Join-Path $scriptsDir "run_server.ps1") ($runServerScript + "`n")
 
@@ -385,7 +393,13 @@ if (-not $SkipServerHelp) {
     if (-not (Test-Path -LiteralPath $server)) {
         throw "server binary not found: $server"
     }
-    $help = & $server --help 2>&1
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $help = & $server --help 2>&1
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "server --help failed with exit code $LASTEXITCODE"
     }
@@ -397,7 +411,13 @@ if (-not $SkipServerHelp) {
     $oldFishRoot = $env:FISH_S2PRO_ROOT
     Remove-Item Env:FISH_S2PRO_ROOT -ErrorAction SilentlyContinue
     try {
-        $paths = & $server --print-paths 2>&1
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $paths = & $server --print-paths 2>&1
+        } finally {
+            $ErrorActionPreference = $oldErrorActionPreference
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "server --print-paths failed with exit code $LASTEXITCODE"
         }
@@ -441,10 +461,11 @@ This package contains the RustPure MVP binaries and optional cpp-engine/ffi-cuda
 2. Run bin/fish-s2pro$exeSuffix for the GUI.
 3. Or run scripts/run_server.ps1 -MaxNewTokens 1 -Port 8081.
 4. For CUDA FFI builds, run scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0.
-5. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
-6. Validate the package files with scripts/verify_package.ps1.
-7. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.
-8. Check CUDA compatibility with scripts/check_cuda_compat.ps1.
+5. Experimental codec CUDA is opt-in: scripts/run_server.ps1 -Backend ffi-cuda -CudaDevice 0 -CodecCuda.
+6. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
+7. Validate the package files with scripts/verify_package.ps1.
+8. Diagnose package paths with bin/fish_s2_server$exeSuffix --print-paths.
+9. Check CUDA compatibility with scripts/check_cuda_compat.ps1.
 
 The package intentionally does not include model weights or tokenizer assets.
 "@

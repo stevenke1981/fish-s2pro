@@ -21,13 +21,24 @@ static void copy_err(char *err, size_t err_cap, const std::string &msg) {
     err[err_cap - 1] = '\0';
 }
 
-static void set_cuda_device_env(int32_t device) {
-    const std::string value = std::to_string(device);
+static void set_env_value(const char *name, const std::string &value) {
 #ifdef _WIN32
-    _putenv_s("FISH_S2_CUDA_DEVICE", value.c_str());
+    _putenv_s(name, value.c_str());
 #else
-    setenv("FISH_S2_CUDA_DEVICE", value.c_str(), 1);
+    setenv(name, value.c_str(), 1);
 #endif
+}
+
+static void unset_env_value(const char *name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+static void set_cuda_device_env(const char *name, int32_t device) {
+    set_env_value(name, std::to_string(device));
 }
 
 extern "C" S2EngineHandle *s2_engine_create(const S2EngineConfig *cfg, char *err, size_t err_cap) {
@@ -38,7 +49,14 @@ extern "C" S2EngineHandle *s2_engine_create(const S2EngineConfig *cfg, char *err
     auto *handle = new S2EngineHandle();
     const bool use_cuda = cfg->use_cuda != 0;
     if (use_cuda) {
-        set_cuda_device_env(cfg->cuda_device);
+        set_cuda_device_env("FISH_S2_CUDA_DEVICE", cfg->cuda_device);
+        if (cfg->codec_use_cuda != 0) {
+            set_cuda_device_env("FISH_S2_CODEC_CUDA_DEVICE", cfg->cuda_device);
+        } else {
+            unset_env_value("FISH_S2_CODEC_CUDA_DEVICE");
+        }
+    } else {
+        unset_env_value("FISH_S2_CODEC_CUDA_DEVICE");
     }
     handle->base.model_path = cfg->model_path;
     handle->base.codec_model_path = cfg->codec_path ? cfg->codec_path : "";

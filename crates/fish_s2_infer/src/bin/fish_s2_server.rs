@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut codec = None;
     let mut backend = None;
     let mut cuda_device = None;
+    let mut codec_cuda = false;
     let mut max_new_tokens = None;
     let mut port: u16 = 8081;
     let mut i = 1;
@@ -68,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|_| "invalid --cuda-device")?,
                 );
             }
+            "--codec-cuda" => {
+                codec_cuda = true;
+            }
             "--print-paths" => {
                 print_paths();
                 return Ok(());
@@ -100,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cuda_device) = cuda_device {
         cfg.cuda_device = cuda_device;
     }
+    cfg.codec_cuda = codec_cuda;
     if !default_tokenizer_path().exists() {
         eprintln!(
             "warning: tokenizer missing at {} — run scripts/download_models.ps1",
@@ -108,12 +113,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!(
-        "loading models (may take a while)...\n  backend: {}\n  cuda_device: {}\n  transformer: {}\n  codec: {}",
+        "loading models (may take a while)...\n  backend: {}\n  cuda_device: {}\n  codec_cuda: {}\n  transformer: {}\n  codec: {}",
         cfg.backend.as_str(),
         if cfg.backend.uses_cuda() {
             cfg.cuda_device.to_string()
         } else {
             "unused".to_string()
+        },
+        if cfg.backend.uses_cuda() && cfg.codec_cuda {
+            "enabled (experimental)"
+        } else {
+            "off"
         },
         cfg.transformer_gguf.display(),
         cfg.codec_gguf.display()
@@ -174,7 +184,7 @@ fn print_help() {
         r#"fish_s2_server — in-process S2 Pro inference (Rust)
 
 Usage:
-  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend {}] [--cuda-device N] [--max-new-tokens N] [--print-paths]
+  fish_s2_server [--transformer PATH] [--codec PATH] [--port PORT] [--backend {}] [--cuda-device N] [--codec-cuda] [--max-new-tokens N] [--print-paths]
 
 If paths are omitted, picks the first transformer-only + codec-only pair in models/.
 "#,

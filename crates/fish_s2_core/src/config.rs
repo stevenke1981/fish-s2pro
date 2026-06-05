@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub codec_vulkan_device: i32,
     #[serde(default)]
     pub cuda_device: i32,
+    #[serde(default)]
+    pub codec_cuda: bool,
     pub use_rust_engine: bool,
     pub active_model_pair_id: Option<String>,
     pub voices: Vec<VoiceProfile>,
@@ -54,6 +56,7 @@ impl Default for AppConfig {
             vulkan_device: 0,
             codec_vulkan_device: 0,
             cuda_device: 0,
+            codec_cuda: false,
             use_rust_engine: true,
             active_model_pair_id: None,
             voices: Vec::new(),

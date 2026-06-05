@@ -90,6 +90,7 @@ pub struct EngineConfig {
     pub vulkan_device: i32,
     pub codec_vulkan_device: i32,
     pub cuda_device: i32,
+    pub codec_cuda: bool,
 }
 
 impl EngineConfig {
@@ -118,6 +119,7 @@ impl EngineConfig {
             vulkan_device: 0,
             codec_vulkan_device: 0,
             cuda_device: 0,
+            codec_cuda: false,
         })
     }
 }
@@ -387,6 +389,7 @@ mod native {
         codec_vulkan_device: i32,
         use_cuda: i32,
         cuda_device: i32,
+        codec_use_cuda: i32,
         max_new_tokens: i32,
     }
 
@@ -431,6 +434,7 @@ mod native {
                 codec_vulkan_device: config.codec_vulkan_device,
                 use_cuda: i32::from(config.backend.uses_cuda()),
                 cuda_device: config.cuda_device,
+                codec_use_cuda: i32::from(config.backend.uses_cuda() && config.codec_cuda),
                 max_new_tokens,
             };
             let handle = unsafe { s2_engine_create(&cfg, err_buf.as_mut_ptr(), err_buf.len()) };

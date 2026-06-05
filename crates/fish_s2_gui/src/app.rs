@@ -42,6 +42,7 @@ struct NativeRustEngineKey {
     backend: String,
     max_new_tokens: u32,
     cuda_device: i32,
+    codec_cuda: bool,
     vulkan_device: i32,
     codec_vulkan_device: i32,
 }
@@ -58,6 +59,26 @@ struct WavAnalysis {
     duration_secs: f64,
     rms: f64,
     peak: f64,
+}
+
+fn configure_visuals(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = egui::Color32::from_rgb(25, 28, 31);
+    visuals.window_fill = egui::Color32::from_rgb(31, 35, 39);
+    visuals.extreme_bg_color = egui::Color32::from_rgb(16, 18, 20);
+    visuals.faint_bg_color = egui::Color32::from_rgb(36, 41, 45);
+    visuals.hyperlink_color = egui::Color32::from_rgb(94, 190, 175);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(43, 128, 121);
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(43, 48, 53);
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(56, 64, 70);
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(65, 89, 94);
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(9.0, 7.0);
+    style.spacing.button_padding = egui::vec2(11.0, 6.0);
+    style.spacing.combo_width = 136.0;
+    ctx.set_style(style);
 }
 
 pub struct FishS2App {
@@ -87,7 +108,8 @@ pub struct FishS2App {
 }
 
 impl FishS2App {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        configure_visuals(&cc.egui_ctx);
         let mut config = AppConfig::load();
         let _ = config.ensure_dirs();
         let (bg_tx, bg_rx) = mpsc::channel();
@@ -306,6 +328,7 @@ impl FishS2App {
         engine_cfg.vulkan_device = self.config.vulkan_device;
         engine_cfg.codec_vulkan_device = self.config.codec_vulkan_device;
         engine_cfg.cuda_device = self.config.cuda_device;
+        engine_cfg.codec_cuda = self.config.codec_cuda;
 
         if let (Some(wav), Some(text)) = (&ref_wav, &ref_text) {
             let _ = copy_reference_files(&engine_cfg.workdir, wav, text);
@@ -321,7 +344,11 @@ impl FishS2App {
                             "Rust 推理引擎：http://127.0.0.1:{}\nBackend: {}\n{}\nTransformer: {}\nCodec: {}",
                             self.config.server_port,
                             backend.as_str(),
-                            backend_device_line(backend, self.config.cuda_device),
+                            backend_device_line(
+                                backend,
+                                self.config.cuda_device,
+                                self.config.codec_cuda
+                            ),
                             pair.transformer.path.display(),
                             pair.codec.path.display()
                         );
@@ -430,7 +457,7 @@ impl FishS2App {
         );
         append_log_line(
             &mut self.synthesis_log,
-            &backend_device_line(backend, self.config.cuda_device),
+            &backend_device_line(backend, self.config.cuda_device, self.config.codec_cuda),
         );
         if backend == EngineBackend::RustPure && self.config.server_max_new_tokens > 4 {
             append_log_line(
@@ -447,6 +474,7 @@ impl FishS2App {
             backend: backend.as_str().to_string(),
             max_new_tokens: effective_max_new_tokens,
             cuda_device: self.config.cuda_device,
+            codec_cuda: self.config.codec_cuda,
             vulkan_device: self.config.vulkan_device,
             codec_vulkan_device: self.config.codec_vulkan_device,
         };
@@ -473,6 +501,7 @@ impl FishS2App {
                     engine_cfg.workdir = key.workdir.clone();
                     engine_cfg.generate_params.max_new_tokens = key.max_new_tokens;
                     engine_cfg.cuda_device = key.cuda_device;
+                    engine_cfg.codec_cuda = key.codec_cuda;
                     engine_cfg.vulkan_device = key.vulkan_device;
                     engine_cfg.codec_vulkan_device = key.codec_vulkan_device;
                     send_debug(&tx, &format!("工作目錄：{}", engine_cfg.workdir.display()));
@@ -481,7 +510,11 @@ impl FishS2App {
                         &format!(
                             "後端：{}；{}",
                             engine_cfg.backend.as_str(),
-                            backend_device_line(engine_cfg.backend, engine_cfg.cuda_device)
+                            backend_device_line(
+                                engine_cfg.backend,
+                                engine_cfg.cuda_device,
+                                engine_cfg.codec_cuda
+                            )
                         ),
                     );
                     send_debug(
@@ -671,9 +704,12 @@ impl eframe::App for FishS2App {
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.heading("Fish S2 Pro Studio");
+                ui.heading(egui::RichText::new("Fish S2 Pro Studio").strong());
                 ui.separator();
-                ui.label("fishaudio/s2-pro · GGUF · 本地語音");
+                ui.label(
+                    egui::RichText::new("fishaudio/s2-pro · GGUF · 本地語音")
+                        .color(egui::Color32::from_rgb(175, 185, 188)),
+                );
             });
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Generate, "語音生成");
@@ -684,8 +720,15 @@ impl eframe::App for FishS2App {
                 ui.selectable_value(&mut self.tab, Tab::Server, "伺服器");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let running = self.server_running();
-                    let dot = if running { "🟢" } else { "⚪" };
-                    ui.label(format!("{dot} :{}", self.config.server_port));
+                    let (label, color) = if running {
+                        ("Server online", egui::Color32::from_rgb(114, 205, 155))
+                    } else {
+                        ("Server idle", egui::Color32::from_rgb(166, 173, 176))
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{label} · :{}", self.config.server_port))
+                            .color(color),
+                    );
                 });
             });
         });
@@ -717,62 +760,94 @@ impl eframe::App for FishS2App {
 
 impl FishS2App {
     fn ui_generate(&mut self, ui: &mut egui::Ui) {
-        ui.label("輸入文字並使用 [tag] 控制語氣（S2 Pro 支援 15000+ 種自然語言標籤）。");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.config.use_rust_engine, "原生 Rust 直接生成");
-            ui.label("生成 token");
-            let token_changed = ui
-                .add(egui::DragValue::new(&mut self.config.server_max_new_tokens).range(1..=2048))
-                .changed();
-            if token_changed {
-                self.native_rust_engine = None;
-                self.persist();
-            }
-            if ui.button("儲存設定").clicked() {
-                self.persist();
-                self.status_line = "設定已儲存".to_string();
-            }
-        });
         ui.horizontal_wrapped(|ui| {
-            let mut changed = false;
-            changed |= preset_combo(
-                ui,
-                "tts_role",
-                "角色",
-                &mut self.config.tts_role,
-                TTS_ROLE_OPTIONS,
+            ui.heading("語音生成");
+            ui.separator();
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} · {}",
+                    self.config.server_backend,
+                    backend_device_line(
+                        EngineBackend::parse(&self.config.server_backend)
+                            .unwrap_or(EngineBackend::RustPure),
+                        self.config.cuda_device,
+                        self.config.codec_cuda
+                    )
+                ))
+                .color(egui::Color32::from_rgb(170, 183, 186)),
             );
-            changed |= preset_combo(
-                ui,
-                "tts_tone",
-                "語調",
-                &mut self.config.tts_tone,
-                TTS_TONE_OPTIONS,
-            );
-            changed |= preset_combo(
-                ui,
-                "tts_pace",
-                "速度",
-                &mut self.config.tts_pace,
-                TTS_PACE_OPTIONS,
-            );
-            changed |= preset_combo(
-                ui,
-                "tts_pitch",
-                "音高",
-                &mut self.config.tts_pitch,
-                TTS_PITCH_OPTIONS,
-            );
-            changed |= preset_combo(
-                ui,
-                "tts_energy",
-                "能量",
-                &mut self.config.tts_energy,
-                TTS_ENERGY_OPTIONS,
-            );
-            if changed {
-                self.persist();
-            }
+        });
+
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                let engine_changed = ui
+                    .checkbox(&mut self.config.use_rust_engine, "原生 Rust 直接生成")
+                    .changed();
+                ui.label("生成 token");
+                let token_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut self.config.server_max_new_tokens)
+                            .range(1..=2048),
+                    )
+                    .changed();
+                if engine_changed || token_changed {
+                    self.native_rust_engine = None;
+                    self.persist();
+                }
+                ui.separator();
+                if ui
+                    .checkbox(&mut self.config.codec_cuda, "Codec CUDA（實驗）")
+                    .changed()
+                {
+                    self.native_rust_engine = None;
+                    self.persist();
+                }
+                if ui.button("儲存設定").clicked() {
+                    self.persist();
+                    self.status_line = "設定已儲存".to_string();
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                let mut changed = false;
+                changed |= preset_combo(
+                    ui,
+                    "tts_role",
+                    "角色",
+                    &mut self.config.tts_role,
+                    TTS_ROLE_OPTIONS,
+                );
+                changed |= preset_combo(
+                    ui,
+                    "tts_tone",
+                    "語調",
+                    &mut self.config.tts_tone,
+                    TTS_TONE_OPTIONS,
+                );
+                changed |= preset_combo(
+                    ui,
+                    "tts_pace",
+                    "速度",
+                    &mut self.config.tts_pace,
+                    TTS_PACE_OPTIONS,
+                );
+                changed |= preset_combo(
+                    ui,
+                    "tts_pitch",
+                    "音高",
+                    &mut self.config.tts_pitch,
+                    TTS_PITCH_OPTIONS,
+                );
+                changed |= preset_combo(
+                    ui,
+                    "tts_energy",
+                    "能量",
+                    &mut self.config.tts_energy,
+                    TTS_ENERGY_OPTIONS,
+                );
+                if changed {
+                    self.persist();
+                }
+            });
         });
         if self.config.server_max_new_tokens <= 1 {
             ui.colored_label(
@@ -786,6 +861,12 @@ impl FishS2App {
                     "目前 token={} 偏短；按生成語音時，CUDA/FFI 會依文字自動提高，避免輸出太短。",
                     self.config.server_max_new_tokens
                 ),
+            );
+        }
+        if self.config.codec_cuda {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 202, 120),
+                "Codec CUDA 已開啟：會設定 FISH_S2_CODEC_CUDA_DEVICE；若遇到 IM2COL CUDA error，請關閉此選項使用穩定 CPU codec decode。",
             );
         }
         ui.add(
@@ -1223,6 +1304,30 @@ impl FishS2App {
             {
                 self.native_rust_engine = None;
             }
+            if ui
+                .checkbox(&mut self.config.codec_cuda, "Codec CUDA（實驗）")
+                .changed()
+            {
+                self.native_rust_engine = None;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let backend = EngineBackend::parse(&self.config.server_backend)
+                .unwrap_or(EngineBackend::RustPure);
+            ui.label(
+                egui::RichText::new(backend_device_line(
+                    backend,
+                    self.config.cuda_device,
+                    self.config.codec_cuda,
+                ))
+                .color(egui::Color32::from_rgb(170, 183, 186)),
+            );
+            if self.config.codec_cuda {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 202, 120),
+                    "Codec CUDA 仍屬實驗路徑，長音訊 decode 可能觸發上游 ggml IM2COL CUDA error。",
+                );
+            }
         });
 
         ui.horizontal(|ui| {
@@ -1582,11 +1687,15 @@ fn apply_tts_style(text: &str, style_prefix: &str) -> String {
     }
 }
 
-fn backend_device_line(backend: EngineBackend, cuda_device: i32) -> String {
+fn backend_device_line(backend: EngineBackend, cuda_device: i32, codec_cuda: bool) -> String {
     if backend.uses_cuda() {
-        format!(
-            "CUDA：device {cuda_device}（Transformer 使用 GGML CUDA；codec 預設 CPU fallback，避開 CUDA IM2COL）"
-        )
+        if codec_cuda {
+            format!("CUDA：device {cuda_device}（Transformer + Codec；codec 路徑為實驗開關）")
+        } else {
+            format!(
+                "CUDA：device {cuda_device}（Transformer 使用 GGML CUDA；codec 使用 CPU fallback，避開 CUDA IM2COL）"
+            )
+        }
     } else {
         "CUDA：未使用".to_string()
     }
