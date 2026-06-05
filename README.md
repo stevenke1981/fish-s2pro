@@ -105,8 +105,10 @@ Build a redistributable local MVP folder:
 
 This creates `dist\fish-s2pro-mvp\` with the release GUI/server binaries,
 package-local launch/smoke scripts, model download helper, and license/model
-notes. Add `-Archive` to also write `dist\fish-s2pro-mvp.zip`. Model weights and
-tokenizer assets are intentionally not bundled.
+notes. The package includes `manifest.json`, `SHA256SUMS.txt`, and
+`scripts\verify_package.ps1` for artifact validation. Add `-Archive` to also
+write `dist\fish-s2pro-mvp.zip`. Model weights and tokenizer assets are
+intentionally not bundled.
 
 ## Validation
 

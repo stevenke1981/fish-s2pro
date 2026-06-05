@@ -102,9 +102,10 @@ RustPure 會在 server load 時編碼 reference prompt codes。
 ```
 
 這會產生 `dist\fish-s2pro-mvp\`，內容包含 release GUI/server binaries、
-package-local 啟動與 smoke 腳本、模型下載 helper，以及授權/模型說明。加上
-`-Archive` 可另外輸出 `dist\fish-s2pro-mvp.zip`。模型權重與 tokenizer 資產
-不會被打包進去。
+package-local 啟動與 smoke 腳本、模型下載 helper，以及授權/模型說明。Package
+也包含 `manifest.json`、`SHA256SUMS.txt` 和 `scripts\verify_package.ps1` 供產物
+驗證。加上 `-Archive` 可另外輸出 `dist\fish-s2pro-mvp.zip`。模型權重與
+tokenizer 資產不會被打包進去。
 
 ## 驗證
 

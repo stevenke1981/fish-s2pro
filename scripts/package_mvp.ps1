@@ -64,6 +64,34 @@ function Get-GitValue {
     return $null
 }
 
+function ConvertTo-PackageRelativePath {
+    param([string] $Path)
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $prefix = $distDirFull.TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
+        [System.IO.Path]::DirectorySeparatorChar
+    if (-not ($full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "Path is outside package: $full"
+    }
+    return $full.Substring($prefix.Length).Replace("\", "/")
+}
+
+function Get-PackageFileEntries {
+    Get-ChildItem -LiteralPath $distDirFull -Recurse -File |
+        Where-Object {
+            $_.Name -ne "manifest.json" -and
+            $_.Name -ne "SHA256SUMS.txt"
+        } |
+        Sort-Object FullName |
+        ForEach-Object {
+            [ordered]@{
+                path = ConvertTo-PackageRelativePath $_.FullName
+                bytes = $_.Length
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            }
+        }
+}
+
 Assert-InsideDistRoot $distDirFull
 
 if ($RunVerify) {
@@ -240,6 +268,98 @@ try {
 '@
 Write-Utf8NoBom (Join-Path $scriptsDir "smoke_server.ps1") ($smokeScript + "`n")
 
+$verifyPackageScript = @'
+param(
+    [switch] $SkipServerHelp
+)
+
+$ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "Use-UnicodeEncoding.ps1")
+
+$root = Split-Path $PSScriptRoot -Parent
+$manifestPath = Join-Path $root "manifest.json"
+if (-not (Test-Path -LiteralPath $manifestPath)) {
+    throw "manifest not found: $manifestPath"
+}
+
+$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+if ($manifest.schema -ne "fish-s2pro.mvp-package.v1") {
+    throw "unexpected manifest schema: $($manifest.schema)"
+}
+
+$checksumPath = Join-Path $root $manifest.checksum_file
+if (-not (Test-Path -LiteralPath $checksumPath)) {
+    throw "checksum file not found: $checksumPath"
+}
+$checksumLines = @(Get-Content -LiteralPath $checksumPath | Where-Object { $_.Trim() })
+$manifestChecksumLines = @($manifest.files | ForEach-Object { "$($_.sha256)  $($_.path)" })
+if ($checksumLines.Count -ne $manifestChecksumLines.Count) {
+    throw "checksum count mismatch: expected $($manifestChecksumLines.Count), got $($checksumLines.Count)"
+}
+for ($i = 0; $i -lt $manifestChecksumLines.Count; $i++) {
+    if ($checksumLines[$i] -ne $manifestChecksumLines[$i]) {
+        throw "checksum line mismatch at $i"
+    }
+}
+
+$checked = 0
+foreach ($file in @($manifest.files)) {
+    $path = Join-Path $root ($file.path -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "missing packaged file: $($file.path)"
+    }
+    $item = Get-Item -LiteralPath $path
+    if ($item.Length -ne [int64] $file.bytes) {
+        throw "size mismatch for $($file.path): expected $($file.bytes), got $($item.Length)"
+    }
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+    if ($hash -ne $file.sha256) {
+        throw "sha256 mismatch for $($file.path)"
+    }
+    $checked += 1
+}
+
+$forbidden = Get-ChildItem -LiteralPath (Join-Path $root "models") -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Name -eq "tokenizer.json" -or
+        $_.Extension -in @(".gguf", ".safetensors", ".pth", ".bin")
+    }
+if ($forbidden) {
+    $names = ($forbidden | Select-Object -ExpandProperty FullName) -join "; "
+    throw "package unexpectedly includes model assets: $names"
+}
+
+foreach ($script in @("run_server.ps1", "smoke_server.ps1", "verify_package.ps1")) {
+    $path = Join-Path $PSScriptRoot $script
+    $tokens = $null
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($path, [ref] $tokens, [ref] $errors) | Out-Null
+    if ($errors.Count -gt 0) {
+        $messages = ($errors | ForEach-Object { $_.Message }) -join "; "
+        throw "PowerShell parse errors in ${script}: $messages"
+    }
+}
+
+if (-not $SkipServerHelp) {
+    $server = Join-Path $root "bin\fish_s2_server.exe"
+    if (-not (Test-Path -LiteralPath $server)) {
+        throw "server binary not found: $server"
+    }
+    $help = & $server --help 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "server --help failed with exit code $LASTEXITCODE"
+    }
+    $helpText = $help -join "`n"
+    if ($helpText -notmatch "rust-pure\|ffi") {
+        throw "server help does not advertise rust-pure|ffi"
+    }
+}
+
+Write-Host "package_verified=true"
+Write-Host "checked_files=$checked"
+'@
+Write-Utf8NoBom (Join-Path $scriptsDir "verify_package.ps1") ($verifyPackageScript + "`n")
+
 $packageReadme = @"
 # Fish S2 Pro Rust MVP Package
 
@@ -252,6 +372,7 @@ This package contains the RustPure MVP binaries and support scripts.
 - models/: put tokenizer.json and the transformer-only + codec-only GGUF pair here.
 - scripts/: model download, packaged server launch, and smoke helpers.
 - docs/THIRD_PARTY_NOTICES.md: upstream model/license notes.
+- manifest.json and SHA256SUMS.txt: package inventory and checksums.
 
 ## Quick Start
 
@@ -259,10 +380,15 @@ This package contains the RustPure MVP binaries and support scripts.
 2. Run bin/fish-s2pro$exeSuffix for the GUI.
 3. Or run scripts/run_server.ps1 -MaxNewTokens 1 -Port 8081.
 4. For a short HTTP smoke, run scripts/smoke_server.ps1 -MaxNewTokens 1.
+5. Validate the package files with scripts/verify_package.ps1.
 
 The package intentionally does not include model weights or tokenizer assets.
 "@
 Write-Utf8NoBom (Join-Path $distDirFull "PACKAGE_README.md") ($packageReadme + "`n")
+
+$fileEntries = @(Get-PackageFileEntries)
+$checksumLines = $fileEntries | ForEach-Object { "$($_.sha256)  $($_.path)" }
+Write-Utf8NoBom (Join-Path $distDirFull "SHA256SUMS.txt") (($checksumLines -join "`n") + "`n")
 
 $manifest = [ordered]@{
     schema = "fish-s2pro.mvp-package.v1"
@@ -277,15 +403,22 @@ $manifest = [ordered]@{
     scripts = @(
         "scripts/download_models.ps1",
         "scripts/run_server.ps1",
-        "scripts/smoke_server.ps1"
+        "scripts/smoke_server.ps1",
+        "scripts/verify_package.ps1"
     )
     model_assets_included = $false
+    checksum_file = "SHA256SUMS.txt"
+    files = $fileEntries
     notes = @(
         "RustPure is the default backend.",
         "Legacy external s2.exe subprocess backend requires the legacy-s2-exe feature and is not included in this package."
     )
 }
 Write-Utf8NoBom (Join-Path $distDirFull "manifest.json") (($manifest | ConvertTo-Json -Depth 6) + "`n")
+
+Invoke-Checked -Label "verifying packaged files" -Command {
+    & (Join-Path $scriptsDir "verify_package.ps1")
+}
 
 if ($Archive) {
     $zipPath = "$distDirFull.zip"
