@@ -346,7 +346,7 @@
 - [ ] **9.1** Remove subprocess fallback or gate behind `legacy-s2-exe` feature.
 - [ ] **9.2** Delete unused `fish_s2_core::server::ServerProcess` if fully deprecated.
 - [x] **9.3** Update `models/README.txt` + download script for model sources. `scripts/download_models.ps1` now supports `fishaudio/s2-pro` official checkpoint downloads via `-IncludeOfficialCheckpoint` and GGUF runtime pairs via `-IncludeGguf -Quant ...`; direct Rust inference still uses GGUF while official Safetensors are tokenizer/source/conversion inputs.
-- [ ] **9.4** License attribution: Fish Audio Research License in binary distributions.
+- [x] **9.4** License attribution: `README.md`, `README.zh-TW.md`, `models/README.txt`, and `docs/THIRD_PARTY_NOTICES.md` now distinguish MIT project code from Fish Audio Research License model assets and link upstream model repositories.
 
 ---
 

@@ -18,6 +18,12 @@ Important:
   inference from official Safetensors is not implemented yet; download it when
   you need tokenizer/source weights or a conversion input.
 
+License:
+  Project Rust code is MIT licensed. Fish Audio S2 Pro model weights,
+  tokenizer files, official checkpoints, and GGUF conversions are model assets
+  governed by the upstream model license, not by this repository's MIT license.
+  See docs/THIRD_PARTY_NOTICES.md and the upstream Fish Audio Research License.
+
 Download helper:
   .\scripts\download_models.ps1
   .\scripts\download_models.ps1 -IncludeOfficialCheckpoint -DryRun
