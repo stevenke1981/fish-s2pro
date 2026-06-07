@@ -9,6 +9,7 @@ use crate::paths::project_root;
 use crate::paths::{default_tokenizer_path, ensure_project_dirs, server_workdir};
 use crate::pipeline::{RustPipeline, RustPipelineConfig, RustSynthesisOptions};
 use crate::prompt::PromptCodes;
+use crate::slow_ar::SlowArDecodeProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineBackend {
@@ -158,6 +159,8 @@ pub struct InferenceEngine {
     rust_pipeline: Option<Mutex<RustPipeline>>,
     default_reference: Option<CachedReference>,
     request_reference: Mutex<Option<CachedRequestReference>>,
+    ffi_reference: Mutex<Option<ReferenceCacheKey>>,
+    last_slow_ar_profile: Mutex<Option<SlowArDecodeProfile>>,
     #[cfg(s2_cpp_linked)]
     native: Option<Mutex<native::NativeEngine>>,
 }
@@ -200,6 +203,8 @@ impl InferenceEngine {
             rust_pipeline,
             default_reference,
             request_reference: Mutex::new(None),
+            ffi_reference: Mutex::new(None),
+            last_slow_ar_profile: Mutex::new(None),
             #[cfg(s2_cpp_linked)]
             native,
         })
@@ -213,6 +218,13 @@ impl InferenceEngine {
         self.config.backend.as_str()
     }
 
+    pub fn last_slow_ar_profile(&self) -> Option<SlowArDecodeProfile> {
+        self.last_slow_ar_profile
+            .lock()
+            .ok()
+            .and_then(|profile| *profile)
+    }
+
     pub fn apply_reference(&self, wav: &Path, text: &str) -> Result<()> {
         std::fs::create_dir_all(&self.config.workdir)?;
         std::fs::copy(wav, self.config.workdir.join("reference.wav"))?;
@@ -220,10 +232,33 @@ impl InferenceEngine {
         Ok(())
     }
 
+    fn apply_reference_cached(&self, wav: &Path, text: &str) -> Result<()> {
+        let key = ReferenceCacheKey::from_path(wav, text)?;
+        {
+            let guard = self
+                .ffi_reference
+                .lock()
+                .map_err(|_| InferError::Message("FFI reference cache lock poisoned".into()))?;
+            if guard.as_ref() == Some(&key) {
+                return Ok(());
+            }
+        }
+        self.apply_reference(wav, text)?;
+        let mut guard = self
+            .ffi_reference
+            .lock()
+            .map_err(|_| InferError::Message("FFI reference cache lock poisoned".into()))?;
+        *guard = Some(key);
+        Ok(())
+    }
+
     pub fn synthesize_wav(&self, request: &SynthesisRequest) -> Result<Vec<u8>> {
         if self.config.backend != EngineBackend::RustPure {
+            if let Ok(mut guard) = self.last_slow_ar_profile.lock() {
+                *guard = None;
+            }
             if let (Some(wav), Some(text)) = (&request.reference_wav, &request.reference_text) {
-                self.apply_reference(wav, text)?;
+                self.apply_reference_cached(wav, text)?;
             }
         }
 
@@ -280,7 +315,12 @@ impl InferenceEngine {
             }
         }
 
-        Ok(pipeline.synthesize(&options)?.wav_bytes)
+        let result = pipeline.synthesize(&options)?;
+        let profile = result.codes.slow_ar_profile;
+        if let Ok(mut guard) = self.last_slow_ar_profile.lock() {
+            *guard = Some(profile);
+        }
+        Ok(result.wav_bytes)
     }
 
     fn cached_request_reference(

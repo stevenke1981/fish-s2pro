@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,7 +12,9 @@ use fish_s2_core::{
 };
 #[cfg(feature = "http-client")]
 use fish_s2_core::{TtsClient, TtsRequest};
-use fish_s2_infer::{EngineBackend, EngineConfig, InferenceEngine, SynthesisRequest};
+use fish_s2_infer::{
+    EngineBackend, EngineConfig, InferenceEngine, SlowArDecodeProfile, SynthesisRequest,
+};
 use uuid::Uuid;
 
 use crate::audio::AudioPlayer;
@@ -29,6 +32,7 @@ enum Tab {
 enum BackgroundMsg {
     Status(String),
     SynthesisLog(String),
+    TtsProgress(TtsProgress),
     TtsDone(Result<(Vec<u8>, PathBuf), String>),
     ConvertDone(Result<String, String>),
     ScanDone(ScannedModels),
@@ -51,6 +55,13 @@ struct NativeRustEngineKey {
 struct NativeRustEngineCache {
     key: NativeRustEngineKey,
     engine: Arc<Mutex<Option<InferenceEngine>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TtsProgress {
+    current: usize,
+    total: usize,
+    label: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +133,8 @@ pub struct FishS2App {
     last_wav_path: Option<PathBuf>,
     audio: Option<AudioPlayer>,
     busy: bool,
+    tts_cancel: Option<Arc<AtomicBool>>,
+    tts_progress: Option<TtsProgress>,
     bg_tx: Sender<BackgroundMsg>,
     bg_rx: Receiver<BackgroundMsg>,
     clone_name: String,
@@ -166,6 +179,8 @@ impl FishS2App {
             last_wav_path: None,
             audio,
             busy: false,
+            tts_cancel: None,
+            tts_progress: None,
             bg_tx,
             bg_rx,
             clone_name: "我的聲音".to_string(),
@@ -189,8 +204,17 @@ impl FishS2App {
                 BackgroundMsg::SynthesisLog(line) => {
                     append_log_line(&mut self.synthesis_log, &line);
                 }
+                BackgroundMsg::TtsProgress(progress) => {
+                    self.status_line = format!(
+                        "正在生成分段 {}/{}：{}",
+                        progress.current, progress.total, progress.label
+                    );
+                    self.tts_progress = Some(progress);
+                }
                 BackgroundMsg::TtsDone(Ok((bytes, path))) => {
                     self.busy = false;
+                    self.tts_cancel = None;
+                    self.tts_progress = None;
                     self.last_wav = Some(bytes.clone());
                     self.last_wav_path = Some(path.clone());
                     self.status_line = format!("已生成：{}", path.display());
@@ -233,6 +257,8 @@ impl FishS2App {
                 }
                 BackgroundMsg::TtsDone(Err(e)) => {
                     self.busy = false;
+                    self.tts_cancel = None;
+                    self.tts_progress = None;
                     append_log_line(&mut self.synthesis_log, &format!("失敗：{e}"));
                     self.status_line = e;
                 }
@@ -419,9 +445,26 @@ impl FishS2App {
         }
         let style_prefix = tts_style_prefix(&self.config);
         let display_text = apply_tts_style(&sanitized_text, &style_prefix);
+        let backend = match EngineBackend::parse(&self.config.server_backend) {
+            Ok(backend) => backend,
+            Err(e) => {
+                self.status_line = e.to_string();
+                return;
+            }
+        };
+        let segment_plan = build_tts_segment_plan(
+            self.config.server_max_new_tokens,
+            &sanitized_text,
+            &style_prefix,
+            backend,
+        );
+        let effective_max_new_tokens = segment_plan.max_new_tokens;
+        let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let voice = self.config.active_voice().cloned();
         self.busy = true;
+        self.tts_cancel = Some(cancel_flag.clone());
+        self.tts_progress = None;
         self.synthesis_log.clear();
         append_log_line(&mut self.synthesis_log, "開始：原生 Rust 直接生成");
         append_log_line(&mut self.synthesis_log, &format!("模型：{}", pair.label));
@@ -457,20 +500,6 @@ impl FishS2App {
             &mut self.synthesis_log,
             &format!("文字預覽：{}", text_preview(&display_text)),
         );
-        let backend = match EngineBackend::parse(&self.config.server_backend) {
-            Ok(backend) => backend,
-            Err(e) => {
-                self.status_line = e.to_string();
-                return;
-            }
-        };
-        let segment_plan = build_tts_segment_plan(
-            self.config.server_max_new_tokens,
-            &sanitized_text,
-            &style_prefix,
-            backend,
-        );
-        let effective_max_new_tokens = segment_plan.max_new_tokens;
         append_log_line(
             &mut self.synthesis_log,
             &format!("max_new_tokens：{effective_max_new_tokens}"),
@@ -482,7 +511,7 @@ impl FishS2App {
             append_log_line(
                 &mut self.synthesis_log,
                 &format!(
-                    "分段：{} 段，將逐段生成後合併成單一 WAV。",
+                    "分段：{} 段，將逐段生成後修剪靜音、淡入淡出並合併成單一 WAV。",
                     segment_plan.segments.len()
                 ),
             );
@@ -494,6 +523,10 @@ impl FishS2App {
         append_log_line(
             &mut self.synthesis_log,
             &backend_device_line(backend, self.config.cuda_device, self.config.codec_cuda),
+        );
+        append_log_line(
+            &mut self.synthesis_log,
+            &backend_runtime_line(backend, self.config.cuda_device, self.config.codec_cuda),
         );
         if backend == EngineBackend::RustPure && self.config.server_max_new_tokens > 4 {
             append_log_line(
@@ -571,6 +604,10 @@ impl FishS2App {
                 let reference_text = voice.as_ref().map(|v| v.reference_text.clone());
                 if let Some(wav) = &reference_wav {
                     send_debug(&tx, &format!("Reference WAV：{}", wav.display()));
+                    send_debug(
+                        &tx,
+                        "Reference cache：同一 voice profile 會在此 engine 內重用；分段生成不會重複 reference encode/copy。",
+                    );
                 } else {
                     send_debug(&tx, "Reference：未選擇 voice profile，使用預設提示");
                 }
@@ -581,6 +618,16 @@ impl FishS2App {
                 let synth_start = Instant::now();
                 let mut wav_parts = Vec::with_capacity(segment_plan.segments.len());
                 for (index, segment) in segment_plan.segments.iter().enumerate() {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        return Err(fish_s2_infer::InferError::Message(
+                            "使用者已取消生成".into(),
+                        ));
+                    }
+                    let _ = tx.send(BackgroundMsg::TtsProgress(TtsProgress {
+                        current: index + 1,
+                        total: segment_plan.segments.len(),
+                        label: text_preview(&segment.text),
+                    }));
                     if segment_plan.segments.len() > 1 {
                         send_debug(
                             &tx,
@@ -599,6 +646,15 @@ impl FishS2App {
                         reference_text: reference_text.clone(),
                     };
                     let bytes = engine.synthesize_wav(&request)?;
+                    if let Some(profile) = engine.last_slow_ar_profile() {
+                        send_debug(
+                            &tx,
+                            &format!(
+                                "RustPure profile：{}",
+                                format_slow_ar_profile(profile)
+                            ),
+                        );
+                    }
                     if segment_plan.segments.len() > 1 {
                         send_debug(
                             &tx,
@@ -611,8 +667,13 @@ impl FishS2App {
                         );
                     }
                     wav_parts.push(bytes);
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        return Err(fish_s2_infer::InferError::Message(
+                            "使用者已取消生成".into(),
+                        ));
+                    }
                 }
-                let bytes = merge_wav_pcm16_parts(&wav_parts).ok_or_else(|| {
+                let bytes = merge_wav_pcm16_parts_polished(&wav_parts).ok_or_else(|| {
                     fish_s2_infer::InferError::Message(
                         "分段 WAV 合併失敗：格式不一致或不是 PCM16 WAV".into(),
                     )
@@ -979,6 +1040,19 @@ impl FishS2App {
                 self.run_tts();
             }
             if ui
+                .add_enabled(self.busy, egui::Button::new("停止生成"))
+                .clicked()
+            {
+                if let Some(cancel) = &self.tts_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                    self.status_line = "正在取消：會在目前分段完成後停止".to_string();
+                    append_log_line(
+                        &mut self.synthesis_log,
+                        "取消：已送出停止要求，會在目前分段完成後停止。",
+                    );
+                }
+            }
+            if ui
                 .add_enabled(self.last_wav.is_some(), egui::Button::new("播放"))
                 .clicked()
             {
@@ -1001,6 +1075,19 @@ impl FishS2App {
 
         if let Some(path) = &self.last_wav_path {
             ui.label(format!("最近輸出：{}", path.display()));
+        }
+        if let Some(progress) = &self.tts_progress {
+            let fraction = if progress.total == 0 {
+                0.0
+            } else {
+                progress.current as f32 / progress.total as f32
+            };
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .show_percentage()
+                    .text(format!("分段 {}/{}", progress.current, progress.total)),
+            );
+            ui.label(format!("目前：{}", progress.label));
         }
 
         ui.separator();
@@ -1795,6 +1882,43 @@ fn backend_device_line(backend: EngineBackend, cuda_device: i32, codec_cuda: boo
     }
 }
 
+fn backend_runtime_line(backend: EngineBackend, cuda_device: i32, codec_cuda: bool) -> String {
+    match backend {
+        EngineBackend::FfiCuda => {
+            let codec = if codec_cuda {
+                "codec=CPU fallback（CUDA guard，避免 IM2COL crash）"
+            } else {
+                "codec=CPU fallback"
+            };
+            format!("實際推理後端：model=CUDA device {cuda_device}, {codec}")
+        }
+        EngineBackend::Ffi => "實際推理後端：model=CPU, codec=CPU".to_string(),
+        EngineBackend::RustPure => {
+            "實際推理後端：RustPure CPU（會輸出 Slow-AR top op profile）".to_string()
+        }
+        #[cfg(feature = "legacy-s2-exe")]
+        EngineBackend::Subprocess => "實際推理後端：subprocess".to_string(),
+    }
+}
+
+fn format_slow_ar_profile(profile: SlowArDecodeProfile) -> String {
+    let total = profile.total();
+    if total.is_zero() {
+        return "尚無可用樣本".to_string();
+    }
+    let top = profile
+        .top_ops(3)
+        .into_iter()
+        .filter(|(_, elapsed)| !elapsed.is_zero())
+        .map(|(name, elapsed)| format!("{name}={}", format_elapsed(elapsed)))
+        .collect::<Vec<_>>();
+    if top.is_empty() {
+        format!("total={}", format_elapsed(total))
+    } else {
+        format!("top3 {} / total={}", top.join(", "), format_elapsed(total))
+    }
+}
+
 const MIN_AUDIBLE_TTS_TOKENS: u32 = 128;
 const MAX_AUTO_TTS_TOKENS: u32 = 256;
 
@@ -2150,6 +2274,148 @@ fn merge_wav_pcm16_parts(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
     build_pcm16_wav(first.sample_rate, first.channels, &data)
 }
 
+fn merge_wav_pcm16_parts_polished(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
+    if parts.len() <= 1 {
+        return merge_wav_pcm16_parts(parts);
+    }
+    let first = parse_wav_pcm16_part(parts.first()?)?;
+    let mut data = Vec::new();
+    for (index, bytes) in parts.iter().enumerate() {
+        let part = parse_wav_pcm16_part(bytes)?;
+        if part.sample_rate != first.sample_rate || part.channels != first.channels {
+            return None;
+        }
+        if index > 0 {
+            data.extend_from_slice(&pcm16_silence(
+                first.sample_rate,
+                first.channels,
+                SEGMENT_JOIN_SILENCE_MS,
+            )?);
+        }
+        let polished = polish_pcm16_segment(part.data, part.sample_rate, part.channels)?;
+        data.extend_from_slice(&polished);
+    }
+    build_pcm16_wav(first.sample_rate, first.channels, &data)
+}
+
+const SEGMENT_JOIN_SILENCE_MS: u32 = 55;
+const SEGMENT_EDGE_FADE_MS: u32 = 8;
+const SEGMENT_MAX_TRIM_MS: u32 = 240;
+const PCM16_SILENCE_THRESHOLD: i16 = 96;
+
+fn polish_pcm16_segment(data: &[u8], sample_rate: u32, channels: u16) -> Option<Vec<u8>> {
+    let frame_width = usize::from(channels).checked_mul(2)?;
+    let usable_len = data.len() / frame_width * frame_width;
+    let trimmed = trim_pcm16_edges(
+        &data[..usable_len],
+        channels,
+        ms_to_frames(sample_rate, SEGMENT_MAX_TRIM_MS)?,
+        PCM16_SILENCE_THRESHOLD,
+    )?;
+    apply_pcm16_fade(
+        trimmed,
+        channels,
+        ms_to_frames(sample_rate, SEGMENT_EDGE_FADE_MS)?,
+    )
+}
+
+fn trim_pcm16_edges(
+    data: &[u8],
+    channels: u16,
+    max_trim_frames: usize,
+    threshold: i16,
+) -> Option<&[u8]> {
+    let frame_width = usize::from(channels).checked_mul(2)?;
+    if frame_width == 0 || data.len() < frame_width {
+        return Some(data);
+    }
+    let frames = data.len() / frame_width;
+    let mut start = 0usize;
+    while start < frames
+        && start < max_trim_frames
+        && pcm16_frame_is_silent(data, start, channels, threshold)?
+    {
+        start += 1;
+    }
+    let mut end = frames;
+    let mut trimmed_tail = 0usize;
+    while end > start
+        && trimmed_tail < max_trim_frames
+        && pcm16_frame_is_silent(data, end - 1, channels, threshold)?
+    {
+        end -= 1;
+        trimmed_tail += 1;
+    }
+    if start >= end {
+        return Some(data);
+    }
+    Some(&data[start * frame_width..end * frame_width])
+}
+
+fn pcm16_frame_is_silent(data: &[u8], frame: usize, channels: u16, threshold: i16) -> Option<bool> {
+    let frame_width = usize::from(channels).checked_mul(2)?;
+    let start = frame.checked_mul(frame_width)?;
+    let end = start.checked_add(frame_width)?;
+    let mut peak = 0i16;
+    for sample in data.get(start..end)?.chunks_exact(2) {
+        let value = i16::from_le_bytes([sample[0], sample[1]]).saturating_abs();
+        peak = peak.max(value);
+    }
+    Some(peak <= threshold)
+}
+
+fn apply_pcm16_fade(data: &[u8], channels: u16, fade_frames: usize) -> Option<Vec<u8>> {
+    let frame_width = usize::from(channels).checked_mul(2)?;
+    if frame_width == 0 || fade_frames == 0 || data.len() < frame_width {
+        return Some(data.to_vec());
+    }
+    let frames = data.len() / frame_width;
+    let fade_frames = fade_frames.min(frames / 2);
+    if fade_frames == 0 {
+        return Some(data.to_vec());
+    }
+    let mut out = data.to_vec();
+    for frame in 0..frames {
+        let fade_in = if frame < fade_frames {
+            (frame + 1) as f32 / fade_frames as f32
+        } else {
+            1.0
+        };
+        let fade_out = if frames - frame <= fade_frames {
+            (frames - frame) as f32 / fade_frames as f32
+        } else {
+            1.0
+        };
+        let scale = fade_in.min(fade_out);
+        if scale >= 1.0 {
+            continue;
+        }
+        let start = frame.checked_mul(frame_width)?;
+        let end = start.checked_add(frame_width)?;
+        for sample in out.get_mut(start..end)?.chunks_exact_mut(2) {
+            let value = i16::from_le_bytes([sample[0], sample[1]]) as f32;
+            let faded = (value * scale)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            sample.copy_from_slice(&faded.to_le_bytes());
+        }
+    }
+    Some(out)
+}
+
+fn pcm16_silence(sample_rate: u32, channels: u16, duration_ms: u32) -> Option<Vec<u8>> {
+    let frames = ms_to_frames(sample_rate, duration_ms)?;
+    let bytes = frames.checked_mul(usize::from(channels))?.checked_mul(2)?;
+    Some(vec![0; bytes])
+}
+
+fn ms_to_frames(sample_rate: u32, duration_ms: u32) -> Option<usize> {
+    let frames = u64::from(sample_rate)
+        .checked_mul(u64::from(duration_ms))?
+        .checked_div(1000)?;
+    usize::try_from(frames).ok()
+}
+
 fn build_pcm16_wav(sample_rate: u32, channels: u16, data: &[u8]) -> Option<Vec<u8>> {
     let bytes_per_sample = 2u16;
     let block_align = channels.checked_mul(bytes_per_sample)?;
@@ -2273,6 +2539,29 @@ mod tests {
         let second = test_wav(&[300, 400], 48_000, 1);
 
         assert!(merge_wav_pcm16_parts(&[first, second]).is_none());
+    }
+
+    #[test]
+    fn polished_merge_trims_edges_and_inserts_join_silence() {
+        let first = test_wav(&[0, 0, 2000, 2000, 0, 0], 1000, 1);
+        let second = test_wav(&[0, 0, -2000, -2000, 0, 0], 1000, 1);
+
+        let merged = merge_wav_pcm16_parts_polished(&[first, second]).unwrap();
+        let part = parse_wav_pcm16_part(&merged).unwrap();
+        let expected_silence_bytes = SEGMENT_JOIN_SILENCE_MS as usize * 2;
+
+        assert!(part.data.len() >= expected_silence_bytes + 8);
+        assert!(part
+            .data
+            .windows(expected_silence_bytes)
+            .any(|window| window.iter().all(|byte| *byte == 0)));
+    }
+
+    #[test]
+    fn backend_runtime_line_reports_cuda_codec_fallback() {
+        let line = backend_runtime_line(EngineBackend::FfiCuda, 0, true);
+        assert!(line.contains("model=CUDA device 0"));
+        assert!(line.contains("CPU fallback"));
     }
 
     #[test]

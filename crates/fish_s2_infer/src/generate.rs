@@ -7,7 +7,7 @@ use crate::registry::DualArGraphSpec;
 use crate::sampling::{
     apply_semantic_bias, build_semantic_bias, sample_token, RandomSource, SamplerParams,
 };
-use crate::slow_ar::{SlowArState, SlowArStepResult};
+use crate::slow_ar::{SlowArDecodeProfile, SlowArState, SlowArStepResult};
 use crate::tokenizer::S2TokenizerConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,6 +42,7 @@ pub struct GenerateCodesResult {
     pub codes: Vec<i32>,
     pub num_codebooks: u32,
     pub n_frames: u32,
+    pub slow_ar_profile: SlowArDecodeProfile,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +126,7 @@ pub fn generate_codes<R: RandomSource + ?Sized>(
     let flat_prompt = transpose_to_time_major(prompt)?;
     state.reset();
     let mut step = state.prefill(&flat_prompt)?;
+    let mut slow_ar_profile = state.decode_profile();
     let bias = build_semantic_bias(
         step.logits.len(),
         graph.semantic_begin_id,
@@ -190,6 +192,7 @@ pub fn generate_codes<R: RandomSource + ?Sized>(
 
         let step_input = build_step_input(main_token, Some(&codebooks), graph)?;
         step = state.step(&step_input)?;
+        slow_ar_profile += state.decode_profile();
         step_index += 1;
 
         let generated_after_prefill = state
@@ -213,6 +216,7 @@ pub fn generate_codes<R: RandomSource + ?Sized>(
         codes,
         num_codebooks,
         n_frames,
+        slow_ar_profile,
     })
 }
 

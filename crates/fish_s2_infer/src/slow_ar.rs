@@ -1,3 +1,4 @@
+use std::ops::AddAssign;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -291,6 +292,18 @@ impl SlowArDecodeProfile {
             SlowArProfileOp::Swiglu => self.swiglu += elapsed,
             SlowArProfileOp::OutputHead => self.output_head += elapsed,
         }
+    }
+}
+
+impl AddAssign for SlowArDecodeProfile {
+    fn add_assign(&mut self, rhs: Self) {
+        self.rms_norm += rhs.rms_norm;
+        self.linear += rhs.linear;
+        self.gqa_attention += rhs.gqa_attention;
+        self.rope += rhs.rope;
+        self.kv_write += rhs.kv_write;
+        self.swiglu += rhs.swiglu;
+        self.output_head += rhs.output_head;
     }
 }
 
