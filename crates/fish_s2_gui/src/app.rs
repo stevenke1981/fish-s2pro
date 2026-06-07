@@ -904,21 +904,79 @@ impl eframe::App for FishS2App {
 
 impl FishS2App {
     fn ui_generate(&mut self, ui: &mut egui::Ui) {
+        let backend =
+            EngineBackend::parse(&self.config.server_backend).unwrap_or(EngineBackend::RustPure);
+        let raw_text = self.script.trim();
+        let sanitized_preview = sanitize_tts_script(raw_text);
+        let style_prefix = tts_style_prefix(&self.config);
+        let preview_plan = build_tts_segment_plan(
+            self.config.server_max_new_tokens,
+            &sanitized_preview,
+            &style_prefix,
+            backend,
+        );
+        let recommended_tokens = recommended_tts_max_new_tokens(&sanitized_preview);
+        let model_label = self
+            .active_pair()
+            .map(|pair| pair.label.clone())
+            .unwrap_or_else(|| "未選擇模型".to_string());
+        let voice_label = self
+            .config
+            .active_voice()
+            .map(|voice| voice.name.clone())
+            .unwrap_or_else(|| "預設音色".to_string());
+        let last_output = self
+            .last_wav
+            .as_ref()
+            .and_then(|bytes| analyze_wav_bytes(bytes))
+            .map(format_wav_analysis)
+            .unwrap_or_else(|| "尚無輸出".to_string());
+
         ui.horizontal_wrapped(|ui| {
             ui.heading("語音生成");
             ui.separator();
             ui.label(
-                egui::RichText::new(format!(
-                    "{} · {}",
-                    self.config.server_backend,
-                    backend_device_line(
-                        EngineBackend::parse(&self.config.server_backend)
-                            .unwrap_or(EngineBackend::RustPure),
-                        self.config.cuda_device,
-                        self.config.codec_cuda
-                    )
+                egui::RichText::new(backend_runtime_line(
+                    backend,
+                    self.config.cuda_device,
+                    self.config.codec_cuda,
                 ))
                 .color(egui::Color32::from_rgb(170, 183, 186)),
+            );
+        });
+
+        ui.columns(4, |columns| {
+            summary_metric(
+                &mut columns[0],
+                "模型 / 聲音",
+                &format!("{model_label}\n{voice_label}"),
+                egui::Color32::from_rgb(116, 197, 175),
+            );
+            summary_metric(
+                &mut columns[1],
+                "文字",
+                &format!(
+                    "{} chars\n約 {} tokens",
+                    sanitized_preview.chars().count(),
+                    preview_plan.estimated_full_tokens
+                ),
+                egui::Color32::from_rgb(123, 168, 220),
+            );
+            summary_metric(
+                &mut columns[2],
+                "分段",
+                &format!(
+                    "{} 段\n每段 {} tokens",
+                    preview_plan.segments.len(),
+                    preview_plan.max_new_tokens
+                ),
+                egui::Color32::from_rgb(222, 176, 102),
+            );
+            summary_metric(
+                &mut columns[3],
+                "最近輸出",
+                &last_output,
+                egui::Color32::from_rgb(184, 160, 220),
             );
         });
 
@@ -938,6 +996,16 @@ impl FishS2App {
                     self.native_rust_engine = None;
                     self.persist();
                 }
+                if ui.button("建議值").clicked() {
+                    self.config.server_max_new_tokens = recommended_tokens;
+                    self.native_rust_engine = None;
+                    self.persist();
+                }
+                ui.label(format!(
+                    "預估：{} 段 / {} tokens",
+                    preview_plan.segments.len(),
+                    preview_plan.max_new_tokens
+                ));
                 ui.separator();
                 if ui
                     .checkbox(&mut self.config.codec_cuda, "Codec CUDA 診斷")
@@ -1012,6 +1080,9 @@ impl FishS2App {
                 egui::Color32::from_rgb(255, 202, 120),
                 "Codec CUDA 診斷已請求，但一般生成會被 C++ guard 改用 CPU codec backend，避免 GGML CUDA IM2COL crash。",
             );
+        }
+        if let Some(note) = &preview_plan.note {
+            ui.colored_label(egui::Color32::from_rgb(190, 210, 145), note);
         }
         ui.add(
             egui::TextEdit::multiline(&mut self.script)
@@ -1409,12 +1480,39 @@ impl FishS2App {
     }
 
     fn ui_server(&mut self, ui: &mut egui::Ui) {
+        let backend =
+            EngineBackend::parse(&self.config.server_backend).unwrap_or(EngineBackend::RustPure);
         ui.label("內建 Rust 推理引擎（fish_s2_infer），API 相容 /v1/tts。");
         ui.label("GGUF 預設目錄：專案 models/（可放 transformer-only + codec-only 配對）。");
         ui.hyperlink_to(
             "建置 native ggml 後端",
             "https://github.com/mach92432/s2.cpp",
         );
+
+        ui.columns(3, |columns| {
+            summary_metric(
+                &mut columns[0],
+                "後端",
+                &backend_summary_value(backend, self.config.cuda_device, self.config.codec_cuda),
+                egui::Color32::from_rgb(116, 197, 175),
+            );
+            summary_metric(
+                &mut columns[1],
+                "Runtime",
+                &format!("{}\n{}", backend.as_str(), self.config.server_backend),
+                egui::Color32::from_rgb(123, 168, 220),
+            );
+            summary_metric(
+                &mut columns[2],
+                "工作目錄",
+                &format!(
+                    ":{}\n{}",
+                    self.config.server_port,
+                    self.config.server_workdir.display()
+                ),
+                egui::Color32::from_rgb(222, 176, 102),
+            );
+        });
 
         ui.horizontal(|ui| {
             ui.label("工作目錄");
@@ -1482,8 +1580,6 @@ impl FishS2App {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            let backend = EngineBackend::parse(&self.config.server_backend)
-                .unwrap_or(EngineBackend::RustPure);
             ui.label(
                 egui::RichText::new(backend_device_line(
                     backend,
@@ -1899,6 +1995,38 @@ fn backend_runtime_line(backend: EngineBackend, cuda_device: i32, codec_cuda: bo
         #[cfg(feature = "legacy-s2-exe")]
         EngineBackend::Subprocess => "實際推理後端：subprocess".to_string(),
     }
+}
+
+fn backend_summary_value(backend: EngineBackend, cuda_device: i32, codec_cuda: bool) -> String {
+    match backend {
+        EngineBackend::FfiCuda => {
+            let codec = if codec_cuda {
+                "codec CPU guard"
+            } else {
+                "codec CPU"
+            };
+            format!("model CUDA {cuda_device}\n{codec}")
+        }
+        EngineBackend::Ffi => "model CPU\ncodec CPU".to_string(),
+        EngineBackend::RustPure => "RustPure CPU\nprofile on".to_string(),
+        #[cfg(feature = "legacy-s2-exe")]
+        EngineBackend::Subprocess => "subprocess\nexternal".to_string(),
+    }
+}
+
+fn summary_metric(ui: &mut egui::Ui, label: &str, value: &str, accent: egui::Color32) {
+    ui.group(|ui| {
+        ui.set_min_height(64.0);
+        ui.label(egui::RichText::new(label).color(egui::Color32::from_rgb(165, 176, 180)));
+        ui.label(egui::RichText::new(value).strong().color(accent));
+    });
+}
+
+fn format_wav_analysis(analysis: WavAnalysis) -> String {
+    format!(
+        "{:.2}s / {}Hz\nRMS {:.4} / peak {:.4}",
+        analysis.duration_secs, analysis.sample_rate, analysis.rms, analysis.peak
+    )
 }
 
 fn format_slow_ar_profile(profile: SlowArDecodeProfile) -> String {
