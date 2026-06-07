@@ -617,6 +617,21 @@ impl FishS2App {
                 send_debug(&tx, "合成：開始 Slow-AR / Fast-AR / codec decode");
                 let synth_start = Instant::now();
                 let mut wav_parts = Vec::with_capacity(segment_plan.segments.len());
+                let segmented = segment_plan.segments.len() > 1;
+                let voice_lock_dir = key.workdir.join("segment_voice_lock");
+                if segmented {
+                    std::fs::create_dir_all(&voice_lock_dir)?;
+                    send_debug(
+                        &tx,
+                        "聲線鎖定：多段生成會把上一段音訊作為下一段 reference，降低換人聲機率。",
+                    );
+                    send_debug(
+                        &tx,
+                        "響度鎖定：合併前會對齊每段 RMS/peak，降低大小聲跳動。",
+                    );
+                }
+                let mut next_reference_wav = reference_wav.clone();
+                let mut next_reference_text = reference_text.clone();
                 for (index, segment) in segment_plan.segments.iter().enumerate() {
                     if cancel_flag.load(Ordering::Relaxed) {
                         return Err(fish_s2_infer::InferError::Message(
@@ -642,8 +657,8 @@ impl FishS2App {
                     }
                     let request = SynthesisRequest {
                         text: segment.text.clone(),
-                        reference_wav: reference_wav.clone(),
-                        reference_text: reference_text.clone(),
+                        reference_wav: next_reference_wav.clone(),
+                        reference_text: next_reference_text.clone(),
                     };
                     let bytes = engine.synthesize_wav(&request)?;
                     if let Some(profile) = engine.last_slow_ar_profile() {
@@ -663,6 +678,20 @@ impl FishS2App {
                                 index + 1,
                                 segment_plan.segments.len(),
                                 bytes.len()
+                            ),
+                        );
+                    }
+                    if segmented {
+                        let voice_lock_path = segment_voice_lock_path(&voice_lock_dir, index);
+                        std::fs::write(&voice_lock_path, &bytes)?;
+                        next_reference_wav = Some(voice_lock_path);
+                        next_reference_text = Some(segment.text.clone());
+                        send_debug(
+                            &tx,
+                            &format!(
+                                "聲線鎖定：分段 {}/{} 已更新下一段 reference。",
+                                index + 1,
+                                segment_plan.segments.len()
                             ),
                         );
                     }
@@ -1707,6 +1736,10 @@ fn format_elapsed(duration: Duration) -> String {
     }
 }
 
+fn segment_voice_lock_path(dir: &std::path::Path, segment_index: usize) -> PathBuf {
+    dir.join(format!("segment_{:03}.wav", segment_index + 1))
+}
+
 #[derive(Clone, Copy)]
 struct TtsPreset {
     id: &'static str,
@@ -2407,12 +2440,24 @@ fn merge_wav_pcm16_parts_polished(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
         return merge_wav_pcm16_parts(parts);
     }
     let first = parse_wav_pcm16_part(parts.first()?)?;
-    let mut data = Vec::new();
-    for (index, bytes) in parts.iter().enumerate() {
+    let mut polished_parts = Vec::with_capacity(parts.len());
+    let mut rms_values = Vec::new();
+    for bytes in parts {
         let part = parse_wav_pcm16_part(bytes)?;
         if part.sample_rate != first.sample_rate || part.channels != first.channels {
             return None;
         }
+        let polished = polish_pcm16_segment(part.data, part.sample_rate, part.channels)?;
+        if let Some((rms, _peak)) = pcm16_rms_peak(&polished) {
+            if rms >= SEGMENT_MIN_RMS_FOR_NORMALIZE {
+                rms_values.push(rms);
+            }
+        }
+        polished_parts.push(polished);
+    }
+    let target_rms = segment_target_rms(&mut rms_values);
+    let mut data = Vec::new();
+    for (index, polished) in polished_parts.iter().enumerate() {
         if index > 0 {
             data.extend_from_slice(&pcm16_silence(
                 first.sample_rate,
@@ -2420,8 +2465,8 @@ fn merge_wav_pcm16_parts_polished(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
                 SEGMENT_JOIN_SILENCE_MS,
             )?);
         }
-        let polished = polish_pcm16_segment(part.data, part.sample_rate, part.channels)?;
-        data.extend_from_slice(&polished);
+        let normalized = normalize_pcm16_loudness(polished, target_rms, SEGMENT_PEAK_CEILING)?;
+        data.extend_from_slice(&normalized);
     }
     build_pcm16_wav(first.sample_rate, first.channels, &data)
 }
@@ -2430,6 +2475,12 @@ const SEGMENT_JOIN_SILENCE_MS: u32 = 55;
 const SEGMENT_EDGE_FADE_MS: u32 = 8;
 const SEGMENT_MAX_TRIM_MS: u32 = 240;
 const PCM16_SILENCE_THRESHOLD: i16 = 96;
+const SEGMENT_MIN_RMS_FOR_NORMALIZE: f64 = 0.001;
+const SEGMENT_TARGET_RMS_FLOOR: f64 = 0.045;
+const SEGMENT_TARGET_RMS_CEIL: f64 = 0.16;
+const SEGMENT_PEAK_CEILING: f64 = 0.92;
+const SEGMENT_MIN_GAIN: f64 = 0.15;
+const SEGMENT_MAX_GAIN: f64 = 3.0;
 
 fn polish_pcm16_segment(data: &[u8], sample_rate: u32, channels: u16) -> Option<Vec<u8>> {
     let frame_width = usize::from(channels).checked_mul(2)?;
@@ -2529,6 +2580,59 @@ fn apply_pcm16_fade(data: &[u8], channels: u16, fade_frames: usize) -> Option<Ve
         }
     }
     Some(out)
+}
+
+fn segment_target_rms(rms_values: &mut [f64]) -> f64 {
+    if rms_values.is_empty() {
+        return SEGMENT_TARGET_RMS_FLOOR;
+    }
+    rms_values.sort_by(|a, b| a.total_cmp(b));
+    let mid = rms_values.len() / 2;
+    let median = if rms_values.len().is_multiple_of(2) {
+        (rms_values[mid - 1] + rms_values[mid]) * 0.5
+    } else {
+        rms_values[mid]
+    };
+    median.clamp(SEGMENT_TARGET_RMS_FLOOR, SEGMENT_TARGET_RMS_CEIL)
+}
+
+fn normalize_pcm16_loudness(data: &[u8], target_rms: f64, peak_ceiling: f64) -> Option<Vec<u8>> {
+    let (rms, peak) = pcm16_rms_peak(data)?;
+    if rms < SEGMENT_MIN_RMS_FOR_NORMALIZE || peak <= 0.0 {
+        return Some(data.to_vec());
+    }
+    let mut gain = (target_rms / rms).clamp(SEGMENT_MIN_GAIN, SEGMENT_MAX_GAIN);
+    if peak * gain > peak_ceiling {
+        gain = (peak_ceiling / peak).min(gain);
+    }
+    if (gain - 1.0).abs() < 0.01 {
+        return Some(data.to_vec());
+    }
+    let mut out = data.to_vec();
+    for sample in out.chunks_exact_mut(2) {
+        let value = i16::from_le_bytes([sample[0], sample[1]]) as f64;
+        let scaled = (value * gain)
+            .round()
+            .clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+        sample.copy_from_slice(&scaled.to_le_bytes());
+    }
+    Some(out)
+}
+
+fn pcm16_rms_peak(data: &[u8]) -> Option<(f64, f64)> {
+    let mut square_sum = 0.0f64;
+    let mut peak = 0.0f64;
+    let mut samples = 0usize;
+    for sample in data.chunks_exact(2) {
+        let value = i16::from_le_bytes([sample[0], sample[1]]) as f64 / 32768.0;
+        square_sum += value * value;
+        peak = peak.max(value.abs());
+        samples += 1;
+    }
+    if samples == 0 {
+        return None;
+    }
+    Some(((square_sum / samples as f64).sqrt(), peak))
 }
 
 fn pcm16_silence(sample_rate: u32, channels: u16, duration_ms: u32) -> Option<Vec<u8>> {
@@ -2686,6 +2790,29 @@ mod tests {
     }
 
     #[test]
+    fn normalize_pcm16_loudness_moves_quiet_and_loud_segments_toward_target() {
+        let quiet = pcm16_bytes(&[800; 128]);
+        let loud = pcm16_bytes(&[12_000; 128]);
+
+        let quiet_norm = normalize_pcm16_loudness(&quiet, 0.08, SEGMENT_PEAK_CEILING).unwrap();
+        let loud_norm = normalize_pcm16_loudness(&loud, 0.08, SEGMENT_PEAK_CEILING).unwrap();
+        let (quiet_rms, quiet_peak) = pcm16_rms_peak(&quiet_norm).unwrap();
+        let (loud_rms, loud_peak) = pcm16_rms_peak(&loud_norm).unwrap();
+
+        assert!(quiet_rms > pcm16_rms_peak(&quiet).unwrap().0);
+        assert!(loud_rms < pcm16_rms_peak(&loud).unwrap().0);
+        assert!((quiet_rms - loud_rms).abs() < 0.02);
+        assert!(quiet_peak <= SEGMENT_PEAK_CEILING + 0.001);
+        assert!(loud_peak <= SEGMENT_PEAK_CEILING + 0.001);
+    }
+
+    #[test]
+    fn segment_voice_lock_path_uses_stable_one_based_names() {
+        let path = segment_voice_lock_path(std::path::Path::new("voice-lock"), 2);
+        assert_eq!(path, PathBuf::from("voice-lock").join("segment_003.wav"));
+    }
+
+    #[test]
     fn backend_runtime_line_reports_cuda_codec_fallback() {
         let line = backend_runtime_line(EngineBackend::FfiCuda, 0, true);
         assert!(line.contains("model=CUDA device 0"));
@@ -2747,5 +2874,12 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+
+    fn pcm16_bytes(samples: &[i16]) -> Vec<u8> {
+        samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect()
     }
 }
