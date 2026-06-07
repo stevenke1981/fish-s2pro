@@ -2,14 +2,14 @@
 # Requires: CMake, C++17, git. Add -UseCuda for GGML_CUDA builds.
 #
 # Usage:
-#   .\scripts\build_s2_native.ps1 -S2CppDir D:\src\s2.cpp
+#   .\scripts\build_s2_native.ps1
+#   .\scripts\build_s2_native.ps1 -UseCuda -CudaArchitectures 86
 #   .\scripts\build_s2_native.ps1 -S2CppDir D:\src\s2.cpp -UseCuda -CudaArchitectures 86
 #   $env:S2_CPP_LIB = "D:\src\s2.cpp\build-native\lib"
 #   cargo build -p fish_s2_gui --features cpp-engine
 
 param(
-    [Parameter(Mandatory = $true)]
-    [string] $S2CppDir,
+    [string] $S2CppDir = "",
     [string] $BuildType = "Release",
     [switch] $UseCuda,
     [int] $CudaDevice = 0,
@@ -19,6 +19,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+$defaultS2CppDir = Join-Path $root "output\s2.cpp-src"
+if (-not $S2CppDir.Trim()) {
+    $S2CppDir = $defaultS2CppDir
+}
+$S2CppDir = [System.IO.Path]::GetFullPath($S2CppDir)
 $ffiDir = Join-Path $root "crates\fish_s2_infer\ffi"
 $buildDirName = if ($UseCuda) { "build-native-rust-cuda" } else { "build-native-rust" }
 $buildDir = Join-Path $S2CppDir $buildDirName
@@ -26,8 +31,11 @@ $ggmlBuildDir = Join-Path $buildDir "ggml"
 $objDir = Join-Path $buildDir "obj"
 $libDir = Join-Path $buildDir "lib"
 
-if (-not (Test-Path $S2CppDir)) {
-    Write-Error "S2CppDir not found: $S2CppDir"
+if (-not (Test-Path -LiteralPath $S2CppDir)) {
+    throw "S2CppDir not found: $S2CppDir. Put or clone s2.cpp at the default path ($defaultS2CppDir), or pass -S2CppDir D:\path\to\s2.cpp."
+}
+if (-not (Test-Path -LiteralPath (Join-Path $S2CppDir "ggml\CMakeLists.txt"))) {
+    throw "S2CppDir does not look like a complete s2.cpp checkout with ggml submodule: $S2CppDir"
 }
 
 function Patch-S2CppCudaHooks {

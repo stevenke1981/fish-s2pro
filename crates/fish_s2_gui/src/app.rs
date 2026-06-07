@@ -62,6 +62,27 @@ struct WavAnalysis {
     peak: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WavPcm16Part<'a> {
+    sample_rate: u32,
+    channels: u16,
+    data: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TtsSegment {
+    text: String,
+    source_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TtsSegmentPlan {
+    segments: Vec<TtsSegment>,
+    max_new_tokens: u32,
+    estimated_full_tokens: u32,
+    note: Option<String>,
+}
+
 fn configure_visuals(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(25, 28, 31);
@@ -397,7 +418,7 @@ impl FishS2App {
             return;
         }
         let style_prefix = tts_style_prefix(&self.config);
-        let text = apply_tts_style(&sanitized_text, &style_prefix);
+        let display_text = apply_tts_style(&sanitized_text, &style_prefix);
 
         let voice = self.config.active_voice().cloned();
         self.busy = true;
@@ -416,8 +437,8 @@ impl FishS2App {
             &mut self.synthesis_log,
             &format!(
                 "文字：{} bytes / {} chars",
-                text.len(),
-                text.chars().count()
+                display_text.len(),
+                display_text.chars().count()
             ),
         );
         if sanitized_text != raw_text {
@@ -434,7 +455,7 @@ impl FishS2App {
         }
         append_log_line(
             &mut self.synthesis_log,
-            &format!("文字預覽：{}", text_preview(&text)),
+            &format!("文字預覽：{}", text_preview(&display_text)),
         );
         let backend = match EngineBackend::parse(&self.config.server_backend) {
             Ok(backend) => backend,
@@ -443,14 +464,28 @@ impl FishS2App {
                 return;
             }
         };
-        let (effective_max_new_tokens, token_note) =
-            effective_tts_max_new_tokens(self.config.server_max_new_tokens, &text, backend);
+        let segment_plan = build_tts_segment_plan(
+            self.config.server_max_new_tokens,
+            &sanitized_text,
+            &style_prefix,
+            backend,
+        );
+        let effective_max_new_tokens = segment_plan.max_new_tokens;
         append_log_line(
             &mut self.synthesis_log,
             &format!("max_new_tokens：{effective_max_new_tokens}"),
         );
-        if let Some(note) = token_note {
-            append_log_line(&mut self.synthesis_log, &note);
+        if let Some(note) = &segment_plan.note {
+            append_log_line(&mut self.synthesis_log, note);
+        }
+        if segment_plan.segments.len() > 1 {
+            append_log_line(
+                &mut self.synthesis_log,
+                &format!(
+                    "分段：{} 段，將逐段生成後合併成單一 WAV。",
+                    segment_plan.segments.len()
+                ),
+            );
         }
         append_log_line(
             &mut self.synthesis_log,
@@ -532,12 +567,9 @@ impl FishS2App {
                     send_status(&tx, "正在使用已載入的原生 Rust 引擎合成語音…");
                     send_debug(&tx, "載入：重用已快取的 RustPure InferenceEngine");
                 }
-                let request = SynthesisRequest {
-                    text,
-                    reference_wav: voice.as_ref().map(|v| v.reference_wav.clone()),
-                    reference_text: voice.as_ref().map(|v| v.reference_text.clone()),
-                };
-                if let Some(wav) = &request.reference_wav {
+                let reference_wav = voice.as_ref().map(|v| v.reference_wav.clone());
+                let reference_text = voice.as_ref().map(|v| v.reference_text.clone());
+                if let Some(wav) = &reference_wav {
                     send_debug(&tx, &format!("Reference WAV：{}", wav.display()));
                 } else {
                     send_debug(&tx, "Reference：未選擇 voice profile，使用預設提示");
@@ -547,7 +579,44 @@ impl FishS2App {
                 })?;
                 send_debug(&tx, "合成：開始 Slow-AR / Fast-AR / codec decode");
                 let synth_start = Instant::now();
-                let bytes = engine.synthesize_wav(&request)?;
+                let mut wav_parts = Vec::with_capacity(segment_plan.segments.len());
+                for (index, segment) in segment_plan.segments.iter().enumerate() {
+                    if segment_plan.segments.len() > 1 {
+                        send_debug(
+                            &tx,
+                            &format!(
+                                "分段 {}/{}：{} chars，{}",
+                                index + 1,
+                                segment_plan.segments.len(),
+                                segment.source_chars,
+                                text_preview(&segment.text)
+                            ),
+                        );
+                    }
+                    let request = SynthesisRequest {
+                        text: segment.text.clone(),
+                        reference_wav: reference_wav.clone(),
+                        reference_text: reference_text.clone(),
+                    };
+                    let bytes = engine.synthesize_wav(&request)?;
+                    if segment_plan.segments.len() > 1 {
+                        send_debug(
+                            &tx,
+                            &format!(
+                                "分段 {}/{}：完成，WAV {} bytes",
+                                index + 1,
+                                segment_plan.segments.len(),
+                                bytes.len()
+                            ),
+                        );
+                    }
+                    wav_parts.push(bytes);
+                }
+                let bytes = merge_wav_pcm16_parts(&wav_parts).ok_or_else(|| {
+                    fish_s2_infer::InferError::Message(
+                        "分段 WAV 合併失敗：格式不一致或不是 PCM16 WAV".into(),
+                    )
+                })?;
                 send_debug(
                     &tx,
                     &format!(
@@ -1727,7 +1796,7 @@ fn backend_device_line(backend: EngineBackend, cuda_device: i32, codec_cuda: boo
 }
 
 const MIN_AUDIBLE_TTS_TOKENS: u32 = 128;
-const MAX_AUTO_TTS_TOKENS: u32 = 1024;
+const MAX_AUTO_TTS_TOKENS: u32 = 256;
 
 fn effective_tts_max_new_tokens(
     configured: u32,
@@ -1749,14 +1818,140 @@ fn effective_tts_max_new_tokens(
     )
 }
 
+fn build_tts_segment_plan(
+    configured: u32,
+    text: &str,
+    style_prefix: &str,
+    backend: EngineBackend,
+) -> TtsSegmentPlan {
+    let estimated_full_tokens = estimated_tts_tokens(text);
+    let (single_pass_tokens, token_note) = effective_tts_max_new_tokens(configured, text, backend);
+    let should_segment = backend.is_ffi()
+        && (estimated_full_tokens > MAX_AUTO_TTS_TOKENS || configured > MAX_AUTO_TTS_TOKENS);
+    if !should_segment {
+        return TtsSegmentPlan {
+            segments: vec![TtsSegment {
+                text: apply_tts_style(text, style_prefix),
+                source_chars: text.chars().count(),
+            }],
+            max_new_tokens: single_pass_tokens,
+            estimated_full_tokens,
+            note: token_note,
+        };
+    }
+
+    let chunks = split_tts_text_for_token_budget(text, MAX_AUTO_TTS_TOKENS);
+    let segment_count = chunks.len();
+    let segments = chunks
+        .into_iter()
+        .map(|chunk| TtsSegment {
+            source_chars: chunk.chars().count(),
+            text: apply_tts_style(&chunk, style_prefix),
+        })
+        .collect::<Vec<_>>();
+    TtsSegmentPlan {
+        segments,
+        max_new_tokens: MAX_AUTO_TTS_TOKENS,
+        estimated_full_tokens,
+        note: Some(if estimated_full_tokens > MAX_AUTO_TTS_TOKENS {
+            format!(
+                "提示：估算這段文字需要約 {estimated_full_tokens} tokens，超過自動上限 {MAX_AUTO_TTS_TOKENS}；已切成 {segment_count} 段逐段生成並合併 WAV。"
+            )
+        } else {
+            format!(
+                "提示：設定的 max_new_tokens={configured} 高於單段上限 {MAX_AUTO_TTS_TOKENS}；已改用每段 {MAX_AUTO_TTS_TOKENS} tokens 生成並合併 WAV。"
+            )
+        }),
+    }
+}
+
 fn recommended_tts_max_new_tokens(text: &str) -> u32 {
+    estimated_tts_tokens(text).clamp(MIN_AUDIBLE_TTS_TOKENS, MAX_AUTO_TTS_TOKENS)
+}
+
+fn estimated_tts_tokens(text: &str) -> u32 {
     let content_chars = text.chars().filter(|c| !c.is_whitespace()).count() as u32;
     if content_chars == 0 {
         return MIN_AUDIBLE_TTS_TOKENS;
     }
-    content_chars
-        .saturating_mul(4)
-        .clamp(MIN_AUDIBLE_TTS_TOKENS, MAX_AUTO_TTS_TOKENS)
+    content_chars.saturating_mul(4).max(MIN_AUDIBLE_TTS_TOKENS)
+}
+
+fn split_tts_text_for_token_budget(text: &str, token_budget: u32) -> Vec<String> {
+    let max_chars = usize::try_from((token_budget / 4).max(1)).unwrap_or(64);
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut current_units = 0usize;
+
+    for sentence in split_tts_sentences(text) {
+        let sentence_units = non_ws_chars(&sentence);
+        if !current.is_empty() && current_units + sentence_units > max_chars {
+            segments.push(current.trim().to_string());
+            current.clear();
+            current_units = 0;
+        }
+        if sentence_units > max_chars {
+            if !current.is_empty() {
+                segments.push(current.trim().to_string());
+                current.clear();
+                current_units = 0;
+            }
+            segments.extend(split_long_tts_sentence(&sentence, max_chars));
+            continue;
+        }
+        current.push_str(&sentence);
+        current_units += sentence_units;
+    }
+
+    if !current.trim().is_empty() {
+        segments.push(current.trim().to_string());
+    }
+    if segments.is_empty() {
+        segments.push(text.trim().to_string());
+    }
+    segments
+}
+
+fn split_tts_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        current.push(ch);
+        if matches!(ch, '。' | '！' | '？' | '；' | '.' | '!' | '?' | ';' | '\n') {
+            if !current.trim().is_empty() {
+                sentences.push(current.trim().to_string());
+            }
+            current.clear();
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+    sentences
+}
+
+fn split_long_tts_sentence(sentence: &str, max_chars: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut units = 0usize;
+    for ch in sentence.chars() {
+        let unit = usize::from(!ch.is_whitespace());
+        if units + unit > max_chars && !current.trim().is_empty() {
+            parts.push(current.trim().to_string());
+            current.clear();
+            units = 0;
+        }
+        current.push(ch);
+        units += unit;
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+    parts
+}
+
+fn non_ws_chars(text: &str) -> usize {
+    text.chars().filter(|ch| !ch.is_whitespace()).count()
 }
 
 fn text_preview(text: &str) -> String {
@@ -1882,6 +2077,104 @@ fn analyze_wav_bytes(bytes: &[u8]) -> Option<WavAnalysis> {
     })
 }
 
+fn parse_wav_pcm16_part(bytes: &[u8]) -> Option<WavPcm16Part<'_>> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut offset = 12usize;
+    let mut audio_format = None;
+    let mut channels = None;
+    let mut sample_rate = None;
+    let mut bits_per_sample = None;
+    let mut data_range = None;
+
+    while offset.checked_add(8)? <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
+        let chunk_start = offset + 8;
+        let chunk_end = chunk_start.checked_add(size)?;
+        if chunk_end > bytes.len() {
+            return None;
+        }
+
+        match id {
+            b"fmt " if size >= 16 => {
+                audio_format = Some(u16::from_le_bytes(
+                    bytes[chunk_start..chunk_start + 2].try_into().ok()?,
+                ));
+                channels = Some(u16::from_le_bytes(
+                    bytes[chunk_start + 2..chunk_start + 4].try_into().ok()?,
+                ));
+                sample_rate = Some(u32::from_le_bytes(
+                    bytes[chunk_start + 4..chunk_start + 8].try_into().ok()?,
+                ));
+                bits_per_sample = Some(u16::from_le_bytes(
+                    bytes[chunk_start + 14..chunk_start + 16].try_into().ok()?,
+                ));
+            }
+            b"data" => data_range = Some(chunk_start..chunk_end),
+            _ => {}
+        }
+
+        offset = chunk_end + (size % 2);
+    }
+
+    if audio_format? != 1 || bits_per_sample? != 16 {
+        return None;
+    }
+    let channels = channels?;
+    let sample_rate = sample_rate?;
+    if channels == 0 || sample_rate == 0 {
+        return None;
+    }
+    let data = &bytes[data_range?];
+    Some(WavPcm16Part {
+        sample_rate,
+        channels,
+        data,
+    })
+}
+
+fn merge_wav_pcm16_parts(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let first = parse_wav_pcm16_part(parts.first()?)?;
+    let mut data = Vec::new();
+    data.extend_from_slice(first.data);
+    for bytes in &parts[1..] {
+        let part = parse_wav_pcm16_part(bytes)?;
+        if part.sample_rate != first.sample_rate || part.channels != first.channels {
+            return None;
+        }
+        data.extend_from_slice(part.data);
+    }
+    build_pcm16_wav(first.sample_rate, first.channels, &data)
+}
+
+fn build_pcm16_wav(sample_rate: u32, channels: u16, data: &[u8]) -> Option<Vec<u8>> {
+    let bytes_per_sample = 2u16;
+    let block_align = channels.checked_mul(bytes_per_sample)?;
+    let byte_rate = sample_rate.checked_mul(u32::from(block_align))?;
+    let data_len = u32::try_from(data.len()).ok()?;
+    let riff_len = 36u32.checked_add(data_len)?;
+
+    let mut out = Vec::with_capacity(44usize.checked_add(data.len())?);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_len.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    out.extend_from_slice(data);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1915,6 +2208,71 @@ mod tests {
         );
         assert_eq!(tokens, MIN_AUDIBLE_TTS_TOKENS);
         assert!(note.unwrap().contains("自動提高"));
+    }
+
+    #[test]
+    fn ffi_generation_caps_automatic_token_raise_for_long_text() {
+        let long_text = "這是一段比較長的測試文字。".repeat(40);
+        let (tokens, note) = effective_tts_max_new_tokens(20, &long_text, EngineBackend::FfiCuda);
+        assert_eq!(tokens, MAX_AUTO_TTS_TOKENS);
+        assert!(note.unwrap().contains("自動提高"));
+
+        let (manual_tokens, note) =
+            effective_tts_max_new_tokens(304, &long_text, EngineBackend::FfiCuda);
+        assert_eq!(manual_tokens, 304);
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn tts_segment_plan_splits_long_ffi_text_at_auto_limit() {
+        let long_text = "第一句需要合成語音，請保持自然停頓。第二句也需要繼續朗讀。".repeat(20);
+        let plan = build_tts_segment_plan(20, &long_text, "", EngineBackend::FfiCuda);
+
+        assert_eq!(plan.max_new_tokens, MAX_AUTO_TTS_TOKENS);
+        assert!(plan.estimated_full_tokens > MAX_AUTO_TTS_TOKENS);
+        assert!(plan.segments.len() > 1);
+        assert!(plan.note.unwrap().contains("逐段生成"));
+        assert!(plan.segments.iter().all(|segment| !segment.text.is_empty()));
+        assert!(plan
+            .segments
+            .iter()
+            .all(|segment| non_ws_chars(&segment.text) <= (MAX_AUTO_TTS_TOKENS / 4) as usize));
+    }
+
+    #[test]
+    fn tts_segment_plan_applies_style_to_each_segment() {
+        let long_text = "這是一段用來測試分段的長文字。".repeat(24);
+        let plan = build_tts_segment_plan(20, &long_text, "[female][calm]", EngineBackend::FfiCuda);
+
+        assert!(plan.segments.len() > 1);
+        assert!(plan
+            .segments
+            .iter()
+            .all(|segment| segment.text.starts_with("[female][calm] ")));
+    }
+
+    #[test]
+    fn merge_wav_pcm16_parts_concatenates_pcm_data() {
+        let first = test_wav(&[100, 200], 44_100, 1);
+        let second = test_wav(&[300, 400, 500], 44_100, 1);
+
+        let merged = merge_wav_pcm16_parts(&[first, second]).unwrap();
+        let analysis = analyze_wav_bytes(&merged).unwrap();
+        let part = parse_wav_pcm16_part(&merged).unwrap();
+
+        assert_eq!(analysis.sample_rate, 44_100);
+        assert_eq!(analysis.channels, 1);
+        assert_eq!(part.data.len(), 10);
+        assert_eq!(part.data[0..2], 100i16.to_le_bytes());
+        assert_eq!(part.data[8..10], 500i16.to_le_bytes());
+    }
+
+    #[test]
+    fn merge_wav_pcm16_parts_rejects_format_mismatch() {
+        let first = test_wav(&[100, 200], 44_100, 1);
+        let second = test_wav(&[300, 400], 48_000, 1);
+
+        assert!(merge_wav_pcm16_parts(&[first, second]).is_none());
     }
 
     #[test]
